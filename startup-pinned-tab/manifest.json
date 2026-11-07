@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Start on first pinned tab",
+  "version": "1.0",
+  "description": "When the browser starts, switches to the first pinned tab and closes the empty New Tab page.",
+  "permissions": ["tabs"],
+  "background": { "service_worker": "background.js" }
+}
