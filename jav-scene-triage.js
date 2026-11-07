@@ -77,7 +77,8 @@
       detail: /^\/index\.php\/\d{4}\/\d{2}\/\d{2}\/[^\/]+\/?$/ },
   ];
   const uniq = (a) => [...new Set(a)];
-  const CODE_RE = /\b((?=[A-Z0-9]*[A-Z])[A-Z0-9]{2,10})-(\d{2,5})\b/;
+  // sukebei title codes, upper or lower case ("MDVR-451", "(sivr-119)")
+  const CODE_RE = /\b((?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,10})-(\d{2,5})\b/;
   const KEY = 'openedScenes';   // { "mdvr-451": timestamp }   = scene was found
   const LINKS = 'sceneLinks';   // { code: {torrent, magnet, view, t} }
 
@@ -868,7 +869,7 @@
       return { torrent: t && t.href, magnet: mg && mg.href,
                view: row ? (titleEl.href || location.href) : location.href };
     };
-    if (!m || getIgnored().includes(m[1])) { if (row) row.classList.add('sil-nocode'); return; }
+    if (!m || getIgnored().includes(m[1].toUpperCase())) { if (row) row.classList.add('sil-nocode'); return; }
     const code = (m[1] + '-' + m[2]).toLowerCase();
     const link = document.createElement('a');
     link.className = 'sil-link';
@@ -962,7 +963,7 @@
         if (!a) return;
         rows++;
         const m = CODE_RE.exec(a.textContent);
-        if (!m || getIgnored().includes(m[1])) return;
+        if (!m || getIgnored().includes(m[1].toUpperCase())) return;
         const code = (m[1] + '-' + m[2]).toLowerCase();
         const k = normKey(m[1], m[2]);
         if (stateOf(code, o, nf) || seenKeys.has(k)) return;
