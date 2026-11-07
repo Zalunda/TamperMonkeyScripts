@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Scene Info Link (sukebei -> first site that has the scene)
+// @name         JAV Scene Triage
 // @namespace    zalunda.specializedbrowser
-// @version      4.2
-// @description  Adds an "info" link before scene codes (MDVR-451, FAVR-011...) on nyaa/sukebei. Clicking it probes a list of sites in priority order and opens the first one that has the scene. Remembers which scenes were found, and shows torrent/magnet buttons on the description page.
+// @version      1.0
+// @description  Go through sukebei and JAV listing sites without seeing a scene twice: finds each scene's description page, remembers seen scenes across sites, opens all unseen scenes, keeps a wanted list, and sends torrents to qBittorrent.
 // @match        https://sukebei.nyaa.si/*
 // @match        https://nyaa.si/*
 // Destination sites (keep in sync with SITES below):
@@ -469,7 +469,7 @@
   function detailBox({ code, info, want }) {
     const { host, root } = shadowUI('display:block;position:fixed;top:10px;left:10px;z-index:2147483647;');
     const box = mk('div', 'background:#222;color:#fff;padding:8px 10px;border-radius:6px;font:13px Arial,sans-serif;' +
-      'box-shadow:0 2px 8px #0008;width:320px');
+      'box-shadow:0 2px 8px #0008;min-width:340px;max-width:90vw');
     root.appendChild(box);
     // Browsers only let a script close tabs it opened (tabs opened by the script / its links qualify).
     const closeTab = () => {
@@ -485,18 +485,30 @@
       if (showForm) { box.appendChild(configForm(() => render(false))); return; }
       const cfg = GM_getValue(QB, null);
       const configured = !!(cfg && cfg.url);
-      const BIG = 'padding:8px 14px;font-size:16px;font-weight:bold;text-align:center;color:#fff;' +
-        'border-radius:4px;text-decoration:none;cursor:pointer;';
+      const BIG = 'padding:10px 14px;font-size:16px;font-weight:bold;text-align:center;color:#fff;' +
+        'border-radius:4px;text-decoration:none;cursor:pointer;flex:1;white-space:nowrap;';
       const bigRow = mk('div', 'display:flex;gap:6px;margin-bottom:6px');
       if (info && configured && (info.magnet || info.torrent)) {
-        const qb = mk('a', BIG + 'flex:1;background:#2a8', '➕ qBittorrent');
+        // qBittorrent configured: one button sends it, no need for the raw torrent/magnet links
+        const qb = mk('a', BIG + 'background:#2a8', '➕ qBittorrent');
         qb.href = '#';
         // after a successful add, close this tab (after a short pause so you see the ✔)
         wireQb(qb, '➕ qBittorrent', () => info, () => { markSeen(); setTimeout(closeTab, 800); });
         bigRow.appendChild(qb);
+      } else if (info) {
+        // no qBittorrent: big Torrent / Magnet buttons
+        const dl = (text, url, bg) => {
+          if (!url) return;
+          const a = mk('a', BIG + 'background:' + bg, text);
+          a.href = url;
+          a.addEventListener('click', markSeen);
+          bigRow.appendChild(a);
+        };
+        dl('⬇ Torrent', info.torrent, '#3582f7');
+        dl('🧲 Magnet', info.magnet, '#3582f7');
       }
       if (want) {
-        const w = mk('a', BIG + 'flex:1;background:#c80', isWanted(location.href) ? '★ Keep' : '★ I want');
+        const w = mk('a', BIG + 'background:#c80', isWanted(location.href) ? '★ Keep' : '★ I want');
         w.href = '#';
         w.addEventListener('click', (ev) => {
           ev.preventDefault();
@@ -515,22 +527,11 @@
       box.appendChild(bigRow);
 
       if (info) {
-        const row = mk('div');
-        const add = (text, url) => {
-          if (!url) return;
-          const a = mk('a', BTN + 'background:#3582f7', text);
-          a.href = url;
-          row.appendChild(a);
-        };
-        add('⬇ Torrent', info.torrent);
-        add('🧲 Magnet', info.magnet);
-        add('Sukebei page', info.view);
         const cfgBtn = mk('a', BTN + 'background:#555;font-size:11px;padding:2px 6px', configured ? '⚙' : '⚙ Configure qBittorrent');
         cfgBtn.href = '#';
         cfgBtn.title = 'Configure qBittorrent remote access';
         cfgBtn.addEventListener('click', (ev) => { ev.preventDefault(); render(true); });
-        row.appendChild(cfgBtn);
-        box.appendChild(row);
+        box.appendChild(cfgBtn);
       }
     }
     render(false);
@@ -543,13 +544,39 @@
     const st = document.createElement('style');
     st.textContent = '.sil-l-seen{opacity:.4} body.sil-l-hide .sil-l-seen{display:none !important}' +
       '.sil-l-badge{display:inline-block;margin-right:4px;padding:0 4px;font:11px Arial,sans-serif;color:#555;' +
-      'background:#eee;border:1px solid #ccc;border-radius:3px}';
+      'background:#eee;border:1px solid #ccc;border-radius:3px}' +
+      'a.sil-l-info{margin-right:6px;padding:0 5px;border:1px solid #888;border-radius:3px;text-decoration:none;' +
+      'background:#eef;color:#225 !important;font:bold 14px Arial,sans-serif;cursor:pointer}' +
+      'a.sil-l-info.sil-nf{background:#fee;color:#a55 !important;border-color:#dbb;font-size:9px;font-weight:normal}';
     document.head.appendChild(st);
     const { openAll, hide } = makeToolbar();
     const entries = items.map((el) => {
       const t = el.querySelector(ls.title);
       const m = t && LCODE_RE.exec(t.textContent + ' ' + (t.getAttribute('title') || ''));
       return { el, t, key: m ? normKey(m[1], m[2]) : null, badge: null };
+    });
+    // ℹ link before each title: finds the scene's description page (same lookup as on sukebei)
+    entries.forEach((e) => {
+      if (!e.key || !e.t) return;
+      const link = document.createElement('a');
+      link.className = 'sil-l-info'; link.href = '#'; link.textContent = 'ℹ';
+      link.title = 'Find info for ' + e.key.toUpperCase();
+      const paintInfo = () => { const nf = !!getNF()[e.key]; link.classList.toggle('sil-nf', nf); link.textContent = nf ? 'ℹ✗' : 'ℹ'; };
+      paintInfo();
+      let busy = false;
+      link.addEventListener('click', async (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        if (busy) return;
+        busy = true;
+        const tab = window.open('about:blank', '_blank'); // inside the click, so popup blockers allow it
+        link.textContent = '…';
+        const found = await findScene(e.key, (name) => { link.title = 'Trying ' + name + '…'; });
+        setNF(e.key, !found);
+        paintInfo();
+        if (tab) tab.location.href = found || 'https://www.google.com/search?q=' + encodeURIComponent(e.key);
+        busy = false;
+      });
+      e.t.insertAdjacentElement('beforebegin', link);
     });
     const seenSet = () => new Set(Object.keys(getOpened()).map((c) => { const [p, n] = c.split('-'); return normKey(p, n); }));
     function apply() {
@@ -582,6 +609,16 @@
     if (typeof GM_addValueChangeListener === 'function') GM_addValueChangeListener(KEY, apply);
     apply();
   }
+
+  // HTTP GET through the userscript manager (cross-origin), used for the site lookups.
+  const get = (url) => new Promise((resolve) => {
+    GM_xmlhttpRequest({
+      method: 'GET', url, timeout: TIMEOUT_MS,
+      onload: (r) => resolve({ status: r.status, text: r.responseText || '', url: r.finalUrl || url }),
+      onerror: () => resolve({ status: 0, text: '' }),
+      ontimeout: () => resolve({ status: 0, text: '' }),
+    });
+  });
 
   migrateOpened();
 
@@ -622,15 +659,6 @@
   }
 
   // ============================ NYAA SIDE ============================
-  const get = (url) => new Promise((resolve) => {
-    GM_xmlhttpRequest({
-      method: 'GET', url, timeout: TIMEOUT_MS,
-      onload: (r) => resolve({ status: r.status, text: r.responseText || '', url: r.finalUrl || url }),
-      onerror: () => resolve({ status: 0, text: '' }),
-      ontimeout: () => resolve({ status: 0, text: '' }),
-    });
-  });
-
   // Returns the URL of the first site that has the scene, or null.
   async function findScene(code, onProgress) {
     const [prefix, num] = code.split('-');
