@@ -35,6 +35,14 @@ the scene listing sites, without looking at the same scene twice.
 
 - The toolbar on each listing page has **Open all unchecked**: it opens, in background
   tabs next to the current one, every scene on the page that isn't seen yet.
+- **Open next 20** opens the next 20 unseen scenes: first the ones on this page, then it
+  follows the next pages (`/page/2/` on the listing sites, `?p=2` on sukebei) until it has 20 (or runs out of pages).
+  On sukebei only scenes that have a description page count toward the 20. The number is set in ⚙
+  (**Scenes for "Open next"**, default 20, 0 hides the button).
+  The script remembers, per listing (or per sukebei search), the last page it picked a scene from. Next time you click it
+  from page 1, it restarts 1 page before that (`RESUME_BACK_PAGES`) instead of re-reading all the earlier pages. If you
+  cleared your seen list, use the Tampermonkey menu command **Forget "Open next" remembered pages**.
+- The toolbar is at the top left by default; choose top/bottom and left/right in ⚙ (**Toolbar position**).
 - On sukebei it first looks each scene up (3 at a time) and opens the page found.
   On the listing sites (3xplanet, jav-angel, maxjav, myjavbay) it opens the scene pages directly.
 - Tabs are opened alphabetically by code (can be changed to page order in ⚙). Then go
@@ -42,9 +50,10 @@ the scene listing sites, without looking at the same scene twice.
 
 ### Keep a list of wanted scenes
 
-- On 3xplanet, jav-angel and maxjav scene pages, **★ I want** adds the page to the wanted list.
+- On 3xplanet, jav-angel and maxjav scene pages, **★ I want** adds the page to the wanted list. It is only shown when the script found no torrent/magnet link for the scene (otherwise you have **➕ qBittorrent** or **⬇ Torrent** / **🧲 Magnet** instead).
 - The **★ Wanted (n)** toolbar button shows the list (shared by every site). Each entry can be
   removed, and **Open all** opens them all in tabs.
+- On listing pages, wanted scenes get an orange **★ wanted** badge instead of the grey "✓ seen" one, and they are never greyed out or hidden by **Hide seen**.
 - **✖ Not interested** on a wanted scene removes it from the list.
 
 ### qBittorrent

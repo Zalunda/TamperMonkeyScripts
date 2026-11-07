@@ -36,6 +36,8 @@
   // ------------------------------------------------------------------
   const PARALLEL = 3;        // how many scenes "Open all unchecked" looks up at once
   const DEFAULT_IGNORED = []; // code prefixes to ignore (not real scenes); editable with the "⚙" form
+  const DEFAULT_OPEN_NEXT = 20; // default for "Open next N" (following page 2, 3...); change it with the "⚙" form, 0 = no button
+  const RESUME_BACK_PAGES = 1; // "Open next" restarts this many pages before the last page it picked from (safety margin)
   const TIMEOUT_MS = 15000;  // per-request timeout (site lookups and qBittorrent)
   // qBittorrent address/login: and the share-ratio limit: use the "⚙" button in the box on the description page.
 
@@ -108,8 +110,25 @@
   const SORT = 'sortAlpha';
   const getSortAlpha = () => GM_getValue(SORT, true);
 
+  // Where the toolbar (Open all / Hide seen / Wanted / settings) sits on listing pages.
+  const TBPOS = 'toolbarPos';
+  const TB_POSITIONS = [['top-left', 'Top left'], ['top-right', 'Top right'],
+                        ['bottom-left', 'Bottom left'], ['bottom-right', 'Bottom right']];
+  const getToolbarPos = () => { const v = GM_getValue(TBPOS, 'top-left'); return TB_POSITIONS.some((x) => x[0] === v) ? v : 'top-left'; };
+
+  // "Open next N" button: how many unseen scenes to collect (0 = button hidden).
+  const ONEXT = 'openNextCount';
+  const getOpenNext = () => {
+    const v = parseInt(GM_getValue(ONEXT, DEFAULT_OPEN_NEXT), 10);
+    return isFinite(v) && v > 0 ? Math.min(v, 200) : 0;
+  };
+
+  // "Open next N" memory: last page a scene was picked from, per listing ("host/path" -> page number).
+  const LASTP = 'openNextLastPage';
+
   // Normalised key so "VRKM-01941" and "vrkm-1941" are the same scene.
-  const LCODE_RE = /\b((?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,10})-(\d{2,5})\b/;
+  // (up to 10 digits: some sites use long ids like "AV-1399778673")
+  const LCODE_RE = /\b((?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,10})-(\d{2,10})\b/;
   const normKey = (prefix, num) => prefix.toLowerCase() + '-' + parseInt(num, 10);
 
   // Wanted list (scenes to look at later), shared by every site: { url: {url, title, t} }
@@ -267,8 +286,6 @@
     root.appendChild(st);
     return { host, root };
   };
-  const BAR_BTN = 'padding:2px 8px;font:12px Arial,sans-serif;border:1px solid #888;border-radius:3px;' +
-    'background:#fff;color:#333;cursor:pointer;margin:0';
   const PANEL = 'width:330px;max-width:90vw;max-height:80vh;overflow:auto;background:#222;color:#fff;padding:8px 10px;' +
     'border-radius:6px;font:13px Arial,sans-serif;box-shadow:0 2px 8px #0008';
   const BTN = 'display:inline-block;margin:0 6px 4px 0;padding:3px 8px;color:#fff;border-radius:3px;' +
@@ -303,6 +320,17 @@
     const sortBox = mk('input', 'margin-right:6px;vertical-align:middle');
     sortBox.type = 'checkbox'; sortBox.checked = getSortAlpha();
     sortWrap.append(sortBox, 'Open all unchecked in alphabetical order (otherwise page order)');
+
+    const posWrap = mk('label', 'display:block;margin:6px 0;font-size:12px', 'Toolbar position ');
+    const posSel = mk('select', 'margin-left:4px;padding:2px;background:#fff;color:#000;border:1px solid #888;border-radius:3px;font:12px sans-serif');
+    TB_POSITIONS.forEach(([v, label]) => { const o = mk('option', 'color:#000', label); o.value = v; posSel.appendChild(o); });
+    posSel.value = getToolbarPos();
+    posWrap.appendChild(posSel);
+
+    const nextWrap = mk('label', 'display:block;margin:6px 0;font-size:12px', 'Scenes for "Open next" (0 = no button) ');
+    const nextIn = mk('input', 'width:60px;margin-left:4px;padding:2px;background:#fff;color:#000;border:1px solid #888;border-radius:3px;font:12px sans-serif');
+    nextIn.type = 'number'; nextIn.min = '0'; nextIn.max = '200'; nextIn.value = String(getOpenNext());
+    nextWrap.appendChild(nextIn);
 
     // --- Seen scenes: export / import ---
     const seenMsg = mk('span', 'font-size:12px');
@@ -367,13 +395,15 @@
       if (c.url !== '' && !/^https?:\/\//.test(c.url)) { msg.textContent = 'Address must start with http:// or https://'; return; }
       GM_setValue(IGN, parsePrefixes(ign.input.value));
       GM_setValue(SORT, sortBox.checked);
+      GM_setValue(TBPOS, posSel.value);
+      GM_setValue(ONEXT, Math.max(0, parseInt(nextIn.value, 10) || 0));
       GM_setValue(QB, c.url === '' ? null : c); // empty address = qBittorrent not configured
       onDone();
     });
     cancel.addEventListener('click', onDone);
 
     const wrap = mk('div');
-    wrap.append(ign.wrap, sortWrap,
+    wrap.append(ign.wrap, sortWrap, posWrap, nextWrap,
                 heading('Seen scenes (' + seenCodes().length + ')'), exp, imp, impFuzzy, fileIn, fuzzIn, seenMsg,
                 heading('qBittorrent remote access'), url.wrap, user.wrap, pass.wrap, ratio.wrap,
                 test, testMsg, msg, save, cancel);
@@ -426,19 +456,29 @@
     return { el: wrap, render };
   }
 
-  // --------------------- toolbar (top right, every list page) ---------------------
+  // --------------------- toolbar (every list page, position is a setting) ---------------------
   // Returns the buttons; callers attach behaviour to openAll / hide.
-  function makeToolbar() {
-    const { host, root } = shadowUI('display:block;position:fixed;top:6px;right:6px;z-index:2147483647;');
-    const bar = mk('div', 'display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap');
-    const bb = (text, title) => { const b = mk('button', BAR_BTN, text); if (title) b.title = title; return b; };
-    const openAll = bb('Open all unchecked');
-    const hide = bb('');
-    const wanted = bb('★ Wanted', 'Scenes marked "I want"');
-    const gear = bb('⚙', 'Settings (qBittorrent, ignored prefixes…)');
-    bar.append(openAll, hide, wanted, gear);
-    const below = mk('div', 'margin-top:4px;display:flex;flex-direction:column;align-items:flex-end;gap:4px');
-    root.append(bar, below);
+  function makeToolbar(withNext) {
+    const [vert, horiz] = getToolbarPos().split('-');           // 'top'|'bottom', 'left'|'right'
+    const { host, root } = shadowUI('display:block;position:fixed;' + vert + ':8px;' + horiz + ':8px;z-index:2147483647;');
+    const side = horiz === 'left' ? 'flex-start' : 'flex-end';
+    // bottom positions: the bar stays at the screen edge and the panels open above it
+    const col = mk('div', 'display:flex;flex-direction:' + (vert === 'top' ? 'column' : 'column-reverse') +
+      ';align-items:' + side + ';gap:4px');
+    const bar = mk('div', 'display:flex;gap:6px;flex-wrap:wrap;justify-content:' + side);
+    const TB_BTN = 'padding:5px 10px;font:bold 13px Arial,sans-serif;color:#fff;border:0;border-radius:4px;' +
+      'cursor:pointer;margin:0;box-shadow:0 1px 4px #0006';
+    const bb = (text, bg, title) => { const b = mk('button', TB_BTN + ';background:' + bg, text); if (title) b.title = title; return b; };
+    const openAll = bb('Open all unchecked', '#2a8');
+    const nextCount = getOpenNext();
+    const openNext = withNext && nextCount ? bb('Open next ' + nextCount, '#2a8', 'Opens the next ' + nextCount + ' unseen scenes, following the next pages if needed') : null;
+    const hide = bb('', '#3582f7');
+    const wanted = bb('★ Wanted', '#c80', 'Scenes marked "I want"');
+    const gear = bb('⚙', '#555', 'Settings (qBittorrent, ignored prefixes, toolbar position…)');
+    bar.append(openAll, ...(openNext ? [openNext] : []), hide, wanted, gear);
+    const below = mk('div', 'display:flex;flex-direction:column;align-items:' + side + ';gap:4px');
+    col.append(bar, below);
+    root.appendChild(col);
 
     let gearPanel = null, wantPanel = null, wp = null;
     const label = () => { wanted.textContent = '★ Wanted (' + Object.keys(getWanted()).length + ')'; };
@@ -461,7 +501,7 @@
       GM_addValueChangeListener(WANT, () => { label(); if (wp) wp.render(); });
     }
     document.body.appendChild(host);
-    return { openAll, hide };
+    return { openAll, openNext, hide };
   }
 
   // ----------------- single-scene page box (top left, shadow DOM) -----------------
@@ -507,7 +547,9 @@
         dl('⬇ Torrent', info.torrent, '#3582f7');
         dl('🧲 Magnet', info.magnet, '#3582f7');
       }
-      if (want) {
+      // "I want" is only offered when there is no torrent/magnet to download (an already wanted page keeps its "Keep" button)
+      const hasLink = !!(info && (info.magnet || info.torrent));
+      if (want && (!hasLink || isWanted(location.href))) {
         const w = mk('a', BIG + 'background:#c80', isWanted(location.href) ? '★ Keep' : '★ I want');
         w.href = '#';
         w.addEventListener('click', (ev) => {
@@ -545,11 +587,12 @@
     st.textContent = '.sil-l-seen{opacity:.4} body.sil-l-hide .sil-l-seen{display:none !important}' +
       '.sil-l-badge{display:inline-block;margin-right:4px;padding:0 4px;font:11px Arial,sans-serif;color:#555;' +
       'background:#eee;border:1px solid #ccc;border-radius:3px}' +
+      '.sil-l-badge.sil-l-want{color:#fff;background:#c80;border-color:#a60;font-weight:bold}' +
       'a.sil-l-info{margin-right:6px;padding:0 5px;border:1px solid #888;border-radius:3px;text-decoration:none;' +
       'background:#eef;color:#225 !important;font:bold 14px Arial,sans-serif;cursor:pointer}' +
       'a.sil-l-info.sil-nf{background:#fee;color:#a55 !important;border-color:#dbb;font-size:9px;font-weight:normal}';
     document.head.appendChild(st);
-    const { openAll, hide } = makeToolbar();
+    const { openAll, openNext, hide } = makeToolbar(true);
     const entries = items.map((el) => {
       const t = el.querySelector(ls.title);
       const m = t && LCODE_RE.exec(t.textContent + ' ' + (t.getAttribute('title') || ''));
@@ -558,6 +601,9 @@
     // ℹ link before each title: finds the scene's description page (same lookup as on sukebei)
     entries.forEach((e) => {
       if (!e.key || !e.t) return;
+      // no lookup link for ignored prefixes or long ids (e.g. "AV-1399778673"): they can't be found on the lookup sites
+      const [kp, kn] = e.key.split('-');
+      if (getIgnored().includes(kp.toUpperCase()) || kn.length > 6) return;
       const link = document.createElement('a');
       link.className = 'sil-l-info'; link.href = '#'; link.textContent = 'ℹ';
       link.title = 'Find info for ' + e.key.toUpperCase();
@@ -579,23 +625,31 @@
       e.t.insertAdjacentElement('beforebegin', link);
     });
     const seenSet = () => new Set(Object.keys(getOpened()).map((c) => { const [p, n] = c.split('-'); return normKey(p, n); }));
+    // keys of the wanted scenes (by the code saved with each entry, or found in its URL)
+    const wantedKeys = () => new Set(Object.values(getWanted()).map((w) => {
+      const m = LCODE_RE.exec(w.code || codeIn(w.url)); return m ? normKey(m[1], m[2]) : null;
+    }).filter(Boolean));
     function apply() {
-      const seen = seenSet();
+      const seen = seenSet(), want = wantedKeys();
       let n = 0;
       entries.forEach((e) => {
-        const is = !!(e.key && seen.has(e.key));
+        // wanted scenes keep full visibility (never greyed out or hidden) and get a ★ badge
+        const wanted = !!(e.t && ((e.key && want.has(e.key)) || isWanted(e.t.href)));
+        const is = !wanted && !!(e.key && seen.has(e.key));
         e.el.classList.toggle('sil-l-seen', is);
         if (is) n++;
-        if (is && !e.badge && e.t) {
-          e.badge = document.createElement('span'); e.badge.className = 'sil-l-badge'; e.badge.textContent = '✓ seen';
-          e.t.parentNode.insertBefore(e.badge, e.t);
-        } else if (!is && e.badge) { e.badge.remove(); e.badge = null; }
+        const text = wanted ? '★ wanted' : is ? '✓ seen' : '';
+        if (text && e.t) {
+          if (!e.badge) { e.badge = document.createElement('span'); e.t.parentNode.insertBefore(e.badge, e.t); }
+          e.badge.className = 'sil-l-badge' + (wanted ? ' sil-l-want' : '');
+          e.badge.textContent = text;
+        } else if (!text && e.badge) { e.badge.remove(); e.badge = null; }
       });
-      const h = GM_getValue(hideKey, false);
+      const h = GM_getValue(hideKey, true);
       document.body.classList.toggle('sil-l-hide', h);
       hide.textContent = (h ? 'Show seen' : 'Hide seen') + ' (' + n + ')';
     }
-    hide.addEventListener('click', () => { GM_setValue(hideKey, !GM_getValue(hideKey, false)); apply(); });
+    hide.addEventListener('click', () => { GM_setValue(hideKey, !GM_getValue(hideKey, true)); apply(); });
     openAll.addEventListener('click', () => {
       const seen = seenSet();
       const todo = entries.filter((e) => e.key && e.t && e.t.href && !seen.has(e.key) && e.el.offsetParent !== null);
@@ -604,9 +658,79 @@
       todo.reverse(); // new tabs are inserted right after this one
       todo.forEach((e) => GM_openInTab(e.t.href, { active: false, insert: true }));
     });
+    // "Open next N": unseen scenes of this page first, then of the following pages (/page/2/, /page/3/...).
+    // From page 1, it resumes a few pages before the last page it picked from last time (remembered per listing).
+    const pageOf = (href) => { const m = /\/page\/(\d+)\/?$/.exec(new URL(href).pathname); return m ? parseInt(m[1], 10) : 1; };
+    const listBase = (u) => {
+      let path = u.pathname.replace(/\/page\/\d+\/?$/, '/').replace(/\/?$/, '/');
+      if (path === '/' && /myjavbay\.com$/.test(u.hostname)) path = '/index.php/';
+      return path;
+    };
+    const pageUrl = (href, n) => {
+      const u = new URL(href);
+      u.pathname = listBase(u) + (n > 1 ? 'page/' + n + '/' : '');
+      u.hash = '';
+      return u.href;
+    };
+    const memKey = () => { const u = new URL(location.href); return u.hostname + listBase(u); };
+    const LIMIT = getOpenNext();
+    let busyNext = false;
+    if (openNext) openNext.addEventListener('click', async () => {
+      if (busyNext) return;
+      busyNext = true;
+      const label = openNext.textContent;
+      try {
+        const seen = seenSet(), want = wantedKeys();
+        const picked = [], keys = new Set();
+        const cur = pageOf(location.href);
+        let lastPickPage = 0;
+        const consider = (key, href, page) => {
+          if (picked.length >= LIMIT || !key || !href || keys.has(key)) return;
+          if (seen.has(key) || want.has(key) || isWanted(href)) return;
+          keys.add(key); picked.push({ key, href }); lastPickPage = Math.max(lastPickPage, page);
+        };
+        entries.forEach((e) => { if (e.el.offsetParent !== null && e.t) consider(e.key, e.t.href, cur); });
+        // from page 1, skip the pages that were already worked through last time
+        const mem = GM_getValue(LASTP, {})[memKey()] || 0;
+        let page = cur + 1;
+        if (cur === 1 && mem - RESUME_BACK_PAGES > page) page = mem - RESUME_BACK_PAGES;
+        const firstPage = page;
+        let fetched = 0, stop = '';
+        while (picked.length < LIMIT && fetched < 40) {
+          openNext.textContent = (page === firstPage && firstPage > cur + 1 ? 'Resuming at page ' : 'Page ') + page +
+                                 '… (' + picked.length + '/' + LIMIT + ')';
+          const url = pageUrl(location.href, page);
+          const r = await get(url);
+          fetched++;
+          if (r.status !== 200) { stop = r.status === 404 ? 'No more pages.' : 'Page ' + page + ' failed (HTTP ' + r.status + ').'; break; }
+          const doc = new DOMParser().parseFromString(r.text, 'text/html');
+          const els = [...doc.querySelectorAll(ls.item)];
+          if (!els.length) { stop = 'No more pages.'; break; }
+          els.forEach((el) => {
+            const t = el.querySelector(ls.title);
+            const m = t && LCODE_RE.exec(t.textContent + ' ' + (t.getAttribute('title') || ''));
+            if (m) consider(normKey(m[1], m[2]), new URL(t.getAttribute('href'), url).href, page);
+          });
+          page++;
+        }
+        if (lastPickPage) { // remember where we got to (from page 1 this is authoritative, otherwise keep the furthest)
+          const all = GM_getValue(LASTP, {});
+          all[memKey()] = cur === 1 ? lastPickPage : Math.max(all[memKey()] || 0, lastPickPage);
+          GM_setValue(LASTP, all);
+        }
+        if (!picked.length) { alert('Nothing unseen to open.' + (stop ? ' ' + stop : '')); return; }
+        if (picked.length < LIMIT && stop) alert('Only ' + picked.length + ' unseen scenes found. ' + stop);
+        if (getSortAlpha()) picked.sort((x, y) => x.key.localeCompare(y.key, undefined, { numeric: true }));
+        picked.reverse(); // new tabs are inserted right after this one
+        picked.forEach((e) => GM_openInTab(e.href, { active: false, insert: true }));
+      } finally {
+        openNext.textContent = label;
+        busyNext = false;
+      }
+    });
     window.addEventListener('focus', apply);
     document.addEventListener('visibilitychange', apply);
-    if (typeof GM_addValueChangeListener === 'function') GM_addValueChangeListener(KEY, apply);
+    if (typeof GM_addValueChangeListener === 'function') { GM_addValueChangeListener(KEY, apply); GM_addValueChangeListener(WANT, apply); }
     apply();
   }
 
@@ -713,16 +837,16 @@
 
   // "hide checked rows": applies to rows already checked when toggled/loaded,
   // so a row you just clicked doesn't vanish under your cursor.
-  const { openAll: openAllBtn, hide: btn } = makeToolbar();
+  const { openAll: openAllBtn, openNext: openNextBtn, hide: btn } = makeToolbar(!!document.querySelector('table.torrent-list'));
   function applyHide() {
-    const hide = GM_getValue('hideSeen', false);
+    const hide = GM_getValue('hideSeen', true);
     document.querySelectorAll('tr.sil-old').forEach((r) => r.classList.remove('sil-old'));
     if (hide) document.querySelectorAll('tr.sil-seen, tr.sil-nf, tr.sil-nocode').forEach((r) => r.classList.add('sil-old'));
     document.body.classList.toggle('sil-hide', hide);
     const n = document.querySelectorAll('tr.sil-seen, tr.sil-nf, tr.sil-nocode').length;
     btn.textContent = (hide ? 'Show' : 'Hide') + ' checked rows (' + n + ')';
   }
-  btn.addEventListener('click', () => { GM_setValue('hideSeen', !GM_getValue('hideSeen', false)); applyHide(); });
+  btn.addEventListener('click', () => { GM_setValue('hideSeen', !GM_getValue('hideSeen', true)); applyHide(); });
 
   const registry = [];
   function refresh() {
@@ -821,6 +945,108 @@
     })();
   });
 
+  // "Open next N" on sukebei: the unchecked scenes of this page, then of the following pages (?p=2, ?p=3...).
+  // Each scene is looked up (PARALLEL at a time) and only scenes that have a description page count toward N.
+  // From page 1 it resumes near the last page it picked from (remembered per search).
+  if (openNextBtn) {
+    const LIMIT = getOpenNext();
+    const pageOf = (href) => parseInt(new URL(href).searchParams.get('p'), 10) || 1;
+    const pageUrl = (href, n) => { const u = new URL(href); if (n > 1) u.searchParams.set('p', n); else u.searchParams.delete('p'); u.hash = ''; return u.href; };
+    const memKey = () => { const u = new URL(location.href); u.searchParams.delete('p'); u.searchParams.sort(); return u.hostname + u.pathname + u.search; };
+    // unchecked scenes of a fetched page (same rules as the page itself): [{ code, lookup }]
+    const candidatesOf = (doc, base, page, seenKeys) => {
+      const o = getOpened(), nf = getNF(), out = [];
+      let rows = 0;
+      doc.querySelectorAll('table.torrent-list tbody tr').forEach((row) => {
+        const a = row.querySelector('td[colspan="2"] a:not(.comments)');
+        if (!a) return;
+        rows++;
+        const m = CODE_RE.exec(a.textContent);
+        if (!m || getIgnored().includes(m[1])) return;
+        const code = (m[1] + '-' + m[2]).toLowerCase();
+        const k = normKey(m[1], m[2]);
+        if (stateOf(code, o, nf) || seenKeys.has(k)) return;
+        seenKeys.add(k);
+        const t = row.querySelector('a[href$=".torrent"], a[href^="/download/"]');
+        const mg = row.querySelector('a[href^="magnet:"]');
+        const info = { torrent: t && new URL(t.getAttribute('href'), base).href, magnet: mg && mg.getAttribute('href'),
+                       view: new URL(a.getAttribute('href'), base).href };
+        out.push({ code, page, lookup: async () => {
+          saveLinks(code, info);
+          const found = await findScene(code);
+          setNF(code, !found);
+          return found;
+        } });
+      });
+      return { out, rows };
+    };
+    let busyNext = false;
+    openNextBtn.addEventListener('click', async () => {
+      if (busyNext) return;
+      busyNext = true;
+      const label = openNextBtn.textContent;
+      try {
+        const cur = pageOf(location.href);
+        const seenKeys = new Set();
+        const queue = [];      // candidates waiting for their lookup
+        const found = [];      // { code, url, page }
+        const lookupBatch = async (batch) => {
+          let i = 0;
+          const worker = async () => {
+            while (i < batch.length) {
+              const c = batch[i++];
+              const url = await c.lookup();
+              if (url) found.push({ code: c.code, url, page: c.page });
+              openNextBtn.textContent = 'Looking up… (' + found.length + '/' + LIMIT + ')';
+            }
+          };
+          await Promise.all(Array.from({ length: PARALLEL }, worker));
+        };
+        // this page (rows already on screen, with their ℹ links)
+        pending().forEach((r) => {
+          const k = r.code.split('-'); seenKeys.add(normKey(k[0], k[1]));
+          queue.push({ code: r.code, page: cur, lookup: r.lookup });
+        });
+        const mem = GM_getValue(LASTP, {})[memKey()] || 0;
+        let page = cur + 1;
+        if (cur === 1 && mem - RESUME_BACK_PAGES > page) page = mem - RESUME_BACK_PAGES;
+        const firstPage = page;
+        let fetched = 0, stop = '';
+        while (found.length < LIMIT) {
+          if (queue.length) {                                  // look up only as many as are still needed
+            await lookupBatch(queue.splice(0, LIMIT - found.length));
+            continue;
+          }
+          if (fetched >= 40) break;
+          openNextBtn.textContent = (page === firstPage && firstPage > cur + 1 ? 'Resuming at page ' : 'Page ') + page +
+                                    '… (' + found.length + '/' + LIMIT + ')';
+          const url = pageUrl(location.href, page);
+          const r = await get(url);
+          fetched++;
+          if (r.status !== 200) { stop = r.status === 404 ? 'No more pages.' : 'Page ' + page + ' failed (HTTP ' + r.status + ').'; break; }
+          const c = candidatesOf(new DOMParser().parseFromString(r.text, 'text/html'), url, page, seenKeys);
+          if (!c.rows) { stop = 'No more pages.'; break; }
+          queue.push(...c.out);
+          page++;
+        }
+        const lastPickPage = found.reduce((mx, f) => Math.max(mx, f.page), 0);
+        if (lastPickPage) {
+          const all = GM_getValue(LASTP, {});
+          all[memKey()] = cur === 1 ? lastPickPage : Math.max(all[memKey()] || 0, lastPickPage);
+          GM_setValue(LASTP, all);
+        }
+        if (!found.length) { alert('Nothing to open.' + (stop ? ' ' + stop : '')); return; }
+        if (found.length < LIMIT && stop) alert('Only ' + found.length + ' scenes found. ' + stop);
+        if (getSortAlpha()) found.sort((x, y) => x.code.localeCompare(y.code, undefined, { numeric: true }));
+        found.reverse(); // new tabs are inserted right after this one
+        found.forEach((f) => GM_openInTab(f.url, { active: false, insert: true }));
+      } finally {
+        openNextBtn.textContent = label;
+        busyNext = false;
+      }
+    });
+  }
+
   // listing page
   document.querySelectorAll('table.torrent-list tbody tr').forEach((row) => {
     const a = row.querySelector('td[colspan="2"] a:not(.comments)');
@@ -834,13 +1060,14 @@
 
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Clear opened-scenes history', () => {
-      if (confirm('Forget all opened scenes?')) { GM_setValue(KEY, {}); GM_setValue(NF, {}); location.reload(); }
+      if (confirm('Forget all opened scenes?')) { GM_setValue(KEY, {}); GM_setValue(NF, {}); GM_setValue(LASTP, {}); location.reload(); }
     });
     GM_registerMenuCommand('Set qBittorrent Web UI', qbSetup);
     GM_registerMenuCommand('Set ignored code prefixes', () => {
       const t = prompt('Ignored code prefixes, comma-separated:', getIgnored().join(', '));
       if (t !== null) { GM_setValue(IGN, parsePrefixes(t)); location.reload(); }
     });
+    GM_registerMenuCommand('Forget "Open next" remembered pages', () => { GM_setValue(LASTP, {}); alert('Done: "Open next" will start from the current page again.'); });
     GM_registerMenuCommand('Show opened count', () =>
       alert(Object.keys(getOpened()).length + ' scenes opened'));
   }
