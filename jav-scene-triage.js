@@ -38,6 +38,7 @@
   const DEFAULT_IGNORED = []; // code prefixes to ignore (not real scenes); editable with the "⚙" form
   const DEFAULT_OPEN_NEXT = 20; // default for "Open next N" (following page 2, 3...); change it with the "⚙" form, 0 = no button
   const RESUME_BACK_PAGES = 1; // "Open next" restarts this many pages before the last page it picked from (safety margin)
+  const COOLDOWN_MS = 2 * 60 * 1000; // a lookup site that returns an error is skipped for this long
   const TIMEOUT_MS = 15000;  // per-request timeout (site lookups and qBittorrent)
   // qBittorrent address/login: and the share-ratio limit: use the "⚙" button in the box on the description page.
 
@@ -58,7 +59,7 @@
     { name: 'r18.dev', noVerify: true, // page is rendered by JS: status only
       probe: (p, n) => uniq([`https://r18.dev/videos/vod/movies/detail/-/id=${p}${pad(n, 5)}/`,
                              `https://r18.dev/videos/vod/movies/detail/-/id=${p}${n}/`]) },
-    { name: 'maxjav', search: true,
+    { name: 'maxjav', search: true, detail: /^\/\d+\/[^\/]+\/?$/, // only accept scene pages (not tag / category links)
       probe: (p, n) => [`https://maxjav.com/?s=${p}-${n}`] },
   ];
   // Listing / scene sites. `item` = one scene's container on listing pages, `title` = element
@@ -624,7 +625,7 @@
         const tab = window.open('about:blank', '_blank'); // inside the click, so popup blockers allow it
         link.textContent = '…';
         const found = await findScene(e.key, (name) => { link.title = 'Trying ' + name + '…'; });
-        setNF(e.key, !found);
+        markNF(e.key, found);
         paintInfo();
         if (tab) tab.location.href = found || 'https://www.google.com/search?q=' + encodeURIComponent(e.key);
         busy = false;
@@ -751,6 +752,47 @@
     });
   });
 
+  // ---- site error reporting: a toast in the corner (one per site + error, with a counter) ----
+  // cooldown shared by every tab (stored): { siteName: timestamp until which it is skipped }
+  const CD = 'siteCooldown';
+  const coolingUntil = (name) => (GM_getValue(CD, {})[name] || 0);
+  const startCooldown = (name) => { const c = GM_getValue(CD, {}); c[name] = Date.now() + COOLDOWN_MS; GM_setValue(CD, c); };
+  const errCodes = new Set(); // codes whose lookup hit a site error: not recorded as "not found"
+  const markNF = (code, found) => {
+    if (found) { errCodes.delete(code); setNF(code, false); return; }
+    if (errCodes.has(code)) return; // a site failed: the scene may exist, don't remember it as not found
+    setNF(code, true);
+  };
+  const toasts = {};
+  let toastBox = null;
+  function siteError(site, status, detail) {
+    const why = status === 0 ? 'no response (timeout / connection refused)'
+      : status === 429 ? 'rate limited (HTTP 429)'
+      : status === 403 ? 'access denied (HTTP 403)'
+      : status === 200 ? (detail || 'anti-bot / captcha page')
+      : 'HTTP ' + status;
+    const key = site + '|' + why;
+    if (!toastBox) {
+      const ui = shadowUI('display:block;position:fixed;bottom:8px;right:8px;z-index:2147483647;');
+      toastBox = mk('div', 'display:flex;flex-direction:column;gap:4px;align-items:flex-end');
+      ui.root.appendChild(toastBox);
+      document.body.appendChild(ui.host);
+    }
+    let t = toasts[key];
+    if (!t) {
+      const el = mk('div', 'max-width:360px;background:#a33;color:#fff;padding:8px 10px;border-radius:6px;' +
+        'font:13px Arial,sans-serif;box-shadow:0 2px 8px #0008;cursor:pointer');
+      el.title = 'Click to dismiss';
+      t = toasts[key] = { el, n: 0 };
+      el.addEventListener('click', () => { el.remove(); delete toasts[key]; });
+      toastBox.appendChild(el);
+    }
+    t.n++;
+    t.el.textContent = '⚠ ' + site + ': ' + why + (t.n > 1 ? ' (x' + t.n + ')' : '') +
+      '. Your IP may be blocked or limited: skipping this site for ' + Math.round(COOLDOWN_MS / 60000) + ' min, trying the others.';
+  }
+  const BLOCK_RE = /just a moment|cf-chrome|captcha|access denied|attention required|too many requests/i;
+
   migrateOpened();
 
   // ======================= LISTING / DESTINATION SITES =======================
@@ -794,22 +836,30 @@
   async function findScene(code, onProgress) {
     const [prefix, num] = code.split('-');
     const re = codeRegex(code);
+    let hadError = false;
+    errCodes.delete(code);
     for (const site of SITES) {
+      if (Date.now() < coolingUntil(site.name)) { hadError = true; continue; } // cooling down after an error
       for (const url of site.probe(prefix, num)) {
         onProgress && onProgress(site.name);
         const r = await get(url);
-        if (r.status !== 200) continue;
+        if (r.status !== 200) {
+          if (r.status !== 404) { siteError(site.name, r.status); hadError = true; startCooldown(site.name); break; }
+          continue;
+        }
+        if (BLOCK_RE.test(r.text.slice(0, 3000)) && !re.test(r.text)) { siteError(site.name, 200); hadError = true; startCooldown(site.name); break; }
         if (site.search) {
           const doc = new DOMParser().parseFromString(r.text, 'text/html');
           for (const a of doc.querySelectorAll('a[href]')) {
             let u; try { u = new URL(a.getAttribute('href'), url); } catch (e) { continue; }
-            if (u.pathname !== '/' && !u.search && re.test(u.pathname)) return u.href;
+            if (u.pathname !== '/' && !u.search && re.test(u.pathname) && (!site.detail || site.detail.test(u.pathname))) { u.hash = ''; return u.href; }
           }
         } else if (site.noVerify || re.test(r.text)) {
           return r.url || url;
         }
       }
     }
+    if (hadError) errCodes.add(code);
     return null;
   }
 
@@ -893,8 +943,8 @@
       saveLinks(code, collect());
       link.textContent = '…';
       const found = await findScene(code, (name) => { link.title = 'Trying ' + name + '…'; });
-      if (found) setNF(code, false); // "seen" is set later, by a decision on the scene's page
-      else { setNF(code, true); link.title = 'Not found on any site'; }
+      markNF(code, found); // "seen" is set later, by a decision on the scene's page
+      if (!found) link.title = errCodes.has(code) ? 'Lookup failed (site error), try again later' : 'Not found on any site';
       paint(link, row, stateOf(code, getOpened(), getNF()));
       busy = false;
       return found;
@@ -982,7 +1032,7 @@
         out.push({ code, page, lookup: async () => {
           saveLinks(code, info);
           const found = await findScene(code);
-          setNF(code, !found);
+          markNF(code, found);
           return found;
         } });
       });
