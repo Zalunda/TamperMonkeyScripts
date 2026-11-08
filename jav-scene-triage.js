@@ -602,11 +602,17 @@
     // ℹ link before each title: finds the scene's description page (same lookup as on sukebei)
     entries.forEach((e) => {
       if (!e.key || !e.t) return;
-      // no lookup link for ignored prefixes or long ids (e.g. "AV-1399778673"): they can't be found on the lookup sites
       const [kp, kn] = e.key.split('-');
-      if (getIgnored().includes(kp.toUpperCase()) || kn.length > 6) return;
+      if (getIgnored().includes(kp.toUpperCase())) return;
       const link = document.createElement('a');
       link.className = 'sil-l-info'; link.href = '#'; link.textContent = 'ℹ';
+      // long ids (e.g. "AV-1399778673") can't be found on the lookup sites: the scene page of this site is the info page
+      if (kn.length > 6) {
+        link.href = e.t.href; link.target = '_blank'; link.rel = 'noopener';
+        link.title = 'Open the scene page ' + e.key.toUpperCase();
+        e.t.insertAdjacentElement('beforebegin', link);
+        return;
+      }
       link.title = 'Find info for ' + e.key.toUpperCase();
       const paintInfo = () => { const nf = !!getNF()[e.key]; link.classList.toggle('sil-nf', nf); link.textContent = nf ? 'ℹ✗' : 'ℹ'; };
       paintInfo();
@@ -957,11 +963,12 @@
     // unchecked scenes of a fetched page (same rules as the page itself): [{ code, lookup }]
     const candidatesOf = (doc, base, page, seenKeys) => {
       const o = getOpened(), nf = getNF(), out = [];
-      let rows = 0;
+      let rows = 0, sig = '';
       doc.querySelectorAll('table.torrent-list tbody tr').forEach((row) => {
         const a = row.querySelector('td[colspan="2"] a:not(.comments)');
         if (!a) return;
         rows++;
+        sig += a.getAttribute('href') + '|'; // page signature: sukebei repeats the last page past its 1000-result limit
         const m = CODE_RE.exec(a.textContent);
         if (!m || getIgnored().includes(m[1].toUpperCase())) return;
         const code = (m[1] + '-' + m[2]).toLowerCase();
@@ -979,7 +986,7 @@
           return found;
         } });
       });
-      return { out, rows };
+      return { out, rows, sig };
     };
     let busyNext = false;
     openNextBtn.addEventListener('click', async () => {
@@ -1012,21 +1019,22 @@
         let page = cur + 1;
         if (cur === 1 && mem - RESUME_BACK_PAGES > page) page = mem - RESUME_BACK_PAGES;
         const firstPage = page;
-        let fetched = 0, stop = '';
+        let fetched = 0, stop = '', lastSig = '';
         while (found.length < LIMIT) {
           if (queue.length) {                                  // look up only as many as are still needed
             await lookupBatch(queue.splice(0, LIMIT - found.length));
             continue;
           }
-          if (fetched >= 40) break;
+          if (stop || fetched >= 40) break;                    // queue drained, and no more pages
           openNextBtn.textContent = (page === firstPage && firstPage > cur + 1 ? 'Resuming at page ' : 'Page ') + page +
                                     '… (' + found.length + '/' + LIMIT + ')';
           const url = pageUrl(location.href, page);
           const r = await get(url);
           fetched++;
-          if (r.status !== 200) { stop = r.status === 404 ? 'No more pages.' : 'Page ' + page + ' failed (HTTP ' + r.status + ').'; break; }
+          if (r.status !== 200) { stop = r.status === 404 ? 'No more pages.' : 'Page ' + page + ' failed (HTTP ' + r.status + ').'; continue; }
           const c = candidatesOf(new DOMParser().parseFromString(r.text, 'text/html'), url, page, seenKeys);
-          if (!c.rows) { stop = 'No more pages.'; break; }
+          if (!c.rows || c.sig === lastSig) { stop = 'No more pages.'; continue; }
+          lastSig = c.sig;
           queue.push(...c.out);
           page++;
         }
