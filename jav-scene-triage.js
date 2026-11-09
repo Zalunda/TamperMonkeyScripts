@@ -48,18 +48,19 @@
   // A candidate is accepted when it answers HTTP 200 and the page text
   // contains the code (fuzzy on leading zeros). `search: true` means the URL
   // is a search page: we parse the first result link containing the code.
+  // `delay` (ms, optional): minimum time between two requests to that site.
   // ------------------------------------------------------------------
   const pad = (n, w) => String(n).padStart(w, '0');
   const SITES = [
-    { name: 'jvrlibrary',
+    { name: 'jvrlibrary', delay: 1000,
       probe: (p, n) => [`https://www.jvrlibrary.com/jvr?id=${p.toUpperCase()}-${n}`] },
-    { name: 'javdatabase',
+    { name: 'javdatabase', delay: 0,
       probe: (p, n) => uniq([`https://www.javdatabase.com/movies/${p}-${n}/`,
                              `https://www.javdatabase.com/movies/${p}-${pad(n, 5)}/`]) },
-    { name: 'r18.dev', noVerify: true, // page is rendered by JS: status only
+    { name: 'r18.dev', delay: 0, noVerify: true, // page is rendered by JS: status only
       probe: (p, n) => uniq([`https://r18.dev/videos/vod/movies/detail/-/id=${p}${pad(n, 5)}/`,
                              `https://r18.dev/videos/vod/movies/detail/-/id=${p}${n}/`]) },
-    { name: 'maxjav', search: true, detail: /^\/\d+\/[^\/]+\/?$/, // only accept scene pages (not tag / category links)
+    { name: 'maxjav', delay: 0, search: true, detail: /^\/\d+\/[^\/]+\/?$/, // only accept scene pages (not tag / category links)
       probe: (p, n) => [`https://maxjav.com/?s=${p}-${n}`] },
   ];
   // Listing / scene sites. `item` = one scene's container on listing pages, `title` = element
@@ -833,6 +834,14 @@
 
   // ============================ NYAA SIDE ============================
   // Returns the URL of the first site that has the scene, or null.
+  // Per-site throttle: waits until `site.delay` ms (default 0) have passed since the last request to that site.
+  const lastReq = {};
+  async function throttle(site) {
+    const wait = (lastReq[site.name] || 0) + (site.delay || 0) - Date.now();
+    lastReq[site.name] = Date.now() + Math.max(0, wait); // reserve the slot so concurrent lookups queue up
+    if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+  }
+
   async function findScene(code, onProgress) {
     const [prefix, num] = code.split('-');
     const re = codeRegex(code);
@@ -842,6 +851,7 @@
       if (Date.now() < coolingUntil(site.name)) { hadError = true; continue; } // cooling down after an error
       for (const url of site.probe(prefix, num)) {
         onProgress && onProgress(site.name);
+        await throttle(site);
         const r = await get(url);
         if (r.status !== 200) {
           if (r.status !== 404) { siteError(site.name, r.status); hadError = true; startCooldown(site.name); break; }
@@ -1047,14 +1057,19 @@
         const cur = pageOf(location.href);
         const seenKeys = new Set();
         const queue = [];      // candidates waiting for their lookup
-        const found = [];      // { code, url, page }
+        const found = [];      // { code, url, page, opened }
+        const sortAlpha = getSortAlpha(); // alphabetical order needs all results first, so tabs open at the end
         const lookupBatch = async (batch) => {
           let i = 0;
           const worker = async () => {
             while (i < batch.length) {
               const c = batch[i++];
               const url = await c.lookup();
-              if (url) found.push({ code: c.code, url, page: c.page });
+              if (url) {
+                const f = { code: c.code, url, page: c.page };
+                found.push(f);
+                if (!sortAlpha) { f.opened = true; GM_openInTab(url, { active: false, insert: true }); } // open as soon as found
+              }
               openNextBtn.textContent = 'Looking up… (' + found.length + '/' + LIMIT + ')';
             }
           };
@@ -1096,9 +1111,9 @@
         }
         if (!found.length) { alert('Nothing to open.' + (stop ? ' ' + stop : '')); return; }
         if (found.length < LIMIT && stop) alert('Only ' + found.length + ' scenes found. ' + stop);
-        if (getSortAlpha()) found.sort((x, y) => x.code.localeCompare(y.code, undefined, { numeric: true }));
+        if (sortAlpha) found.sort((x, y) => x.code.localeCompare(y.code, undefined, { numeric: true }));
         found.reverse(); // new tabs are inserted right after this one
-        found.forEach((f) => GM_openInTab(f.url, { active: false, insert: true }));
+        found.filter((f) => !f.opened).forEach((f) => GM_openInTab(f.url, { active: false, insert: true }));
       } finally {
         openNextBtn.textContent = label;
         busyNext = false;
