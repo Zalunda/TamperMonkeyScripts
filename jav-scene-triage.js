@@ -14,6 +14,7 @@
 // @match        *://*.3xplanet.net/*
 // @match        *://*.jav-angel.net/*
 // @match        *://*.myjavbay.com/*
+// @match        *://*.javlibrary.com/*
 // @connect      jvrlibrary.com
 // @connect      javdatabase.com
 // @connect      r18.dev
@@ -36,6 +37,7 @@
   // ------------------------------------------------------------------
   const DEFAULT_PARALLEL = 3;   // default number of scenes looked up at once ("threads"); change it with the "⚙" form
   const DEFAULT_DELAY_MS = 1000; // default minimum delay between two requests to the same lookup site; change it with the "⚙" form
+  const DEFAULT_DL_HOSTS = ['rapidgator.net', 'rg.to']; // file hosts whose links are offered by "Copy links" (javlibrary comments); change it with the "⚙" form
   const DEFAULT_IGNORED = []; // code prefixes to ignore (not real scenes); editable with the "⚙" form
   const DEFAULT_OPEN_NEXT = 20; // default for "Open next N" (following page 2, 3...); change it with the "⚙" form, 0 = no button
   const RESUME_BACK_PAGES = 1; // "Open next" restarts this many pages before the last page it picked from (safety margin)
@@ -78,6 +80,15 @@
       alsoDestination: true, detail: /^\/\d+\/[^\/]+\/?$/ },
     { domain: 'myjavbay.com',  item: '.gridmag-grid-post',              title: '.gridmag-grid-post-title a', qb: true,
       detail: /^\/index\.php\/\d{4}\/\d{2}\/\d{2}\/[^\/]+\/?$/ },
+    // jvrlibrary: each item is itself the link (`linkSelf`), the code is in .code (home / best) or .title (ranking),
+    // pages are "?page=N" (`pageParam`), a scene is "/jvr?id=CODE".
+    { domain: 'jvrlibrary.com', item: 'a.list-item[href^="/jvr?id="]', title: '.code, .title', linkSelf: true, pageParam: 'page',
+      want: true, alsoDestination: true, detail: /^\/jvr\/?$/ },
+    // javlibrary: item = "div.video" holding a link (`linkSel`) with the code in .id, pages are "?page=N",
+    // a scene is "/en/javXXXXXX.html". `comments`: scene pages are scanned for a torrent / magnet and for
+    // download links (hosts set in the "⚙" form) in the user comments.
+    { domain: 'javlibrary.com', item: 'div.video', title: '.id', linkSel: 'a[href]', pageParam: 'page',
+      want: true, comments: true, detail: /^\/[a-z]{2}\/(?:jav[a-z0-9]+\.html|videocomments\.php)$/i },
   ];
   const uniq = (a) => [...new Set(a)];
   // sukebei title codes, upper or lower case ("MDVR-451", "(sivr-119)")
@@ -110,15 +121,29 @@
   };
   const parsePrefixes = (text) => text.split(/[\s,;]+/).map((x) => x.trim().toUpperCase()).filter(Boolean);
 
+  // File hosts (domains) whose links "Copy links" collects from comments, e.g. rapidgator.net
+  const DLH = 'downloadHosts';
+  const parseHosts = (text) => text.split(/[\s,;]+/).map((x) => x.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(Boolean);
+  const getDlHosts = () => { const v = GM_getValue(DLH, null); return Array.isArray(v) ? v : DEFAULT_DL_HOSTS; };
+
   // "Open all unchecked" order: alphabetical by scene code (default) or page order.
   const SORT = 'sortAlpha';
   const getSortAlpha = () => GM_getValue(SORT, true);
 
   // Where the toolbar (Open all / Hide seen / Wanted / settings) sits on listing pages.
   const TBPOS = 'toolbarPos';
-  const TB_POSITIONS = [['top-left', 'Top left'], ['top-right', 'Top right'],
-                        ['bottom-left', 'Bottom left'], ['bottom-right', 'Bottom right']];
+  const TB_POSITIONS = [['top-left', 'Top left'], ['top-center', 'Top center'], ['top-right', 'Top right'],
+                        ['bottom-left', 'Bottom left'], ['bottom-center', 'Bottom center'], ['bottom-right', 'Bottom right']];
   const getToolbarPos = () => { const v = GM_getValue(TBPOS, 'top-left'); return TB_POSITIONS.some((x) => x[0] === v) ? v : 'top-left'; };
+  // Same choice for the box on the description (single scene) pages.
+  const DPOS = 'detailBoxPos';
+  const getDetailPos = () => { const v = GM_getValue(DPOS, 'top-left'); return TB_POSITIONS.some((x) => x[0] === v) ? v : 'top-left'; };
+  // CSS for a fixed element placed at `pos` ("top-left", "bottom-center"...), `m` px from the edges
+  const posCss = (pos, m) => {
+    const [vert, horiz] = pos.split('-');
+    return 'position:fixed;' + vert + ':' + m + 'px;' +
+      (horiz === 'center' ? 'left:50%;transform:translateX(-50%);width:max-content;max-width:calc(100vw - 16px);' : horiz + ':' + m + 'px;');
+  };
 
   // "Open next N" button: how many unseen scenes to collect (0 = button hidden).
   const ONEXT = 'openNextCount';
@@ -331,6 +356,8 @@
     // --- General ---
     const ign = field('Ignored code prefixes, comma-separated (e.g. VRNC, ABC)', 'text', getIgnored().join(', '));
 
+    const dlh = field('Download hosts for "Copy links" (javlibrary comments), comma-separated domains (e.g. rapidgator.net, k2s.cc)', 'text', getDlHosts().join(', '));
+
     const sortWrap = mk('label', 'display:block;margin:6px 0;font-size:12px;cursor:pointer');
     const sortBox = mk('input', 'margin-right:6px;vertical-align:middle');
     sortBox.type = 'checkbox'; sortBox.checked = getSortAlpha();
@@ -341,6 +368,12 @@
     TB_POSITIONS.forEach(([v, label]) => { const o = mk('option', 'color:#000', label); o.value = v; posSel.appendChild(o); });
     posSel.value = getToolbarPos();
     posWrap.appendChild(posSel);
+
+    const dposWrap = mk('label', 'display:block;margin:6px 0;font-size:12px', 'Description page box position ');
+    const dposSel = mk('select', 'margin-left:4px;padding:2px;background:#fff;color:#000;border:1px solid #888;border-radius:3px;font:12px sans-serif');
+    TB_POSITIONS.forEach(([v, label]) => { const o = mk('option', 'color:#000', label); o.value = v; dposSel.appendChild(o); });
+    dposSel.value = getDetailPos();
+    dposWrap.appendChild(dposSel);
 
     const nextWrap = mk('label', 'display:block;margin:6px 0;font-size:12px', 'Scenes for "Open next" (0 = no button) ');
     const nextIn = mk('input', 'width:60px;margin-left:4px;padding:2px;background:#fff;color:#000;border:1px solid #888;border-radius:3px;font:12px sans-serif');
@@ -419,8 +452,10 @@
       if (c.ratio !== '' && !(Number(c.ratio) >= 0)) { msg.textContent = 'Ratio must be a number (or empty)'; return; }
       if (c.url !== '' && !/^https?:\/\//.test(c.url)) { msg.textContent = 'Address must start with http:// or https://'; return; }
       GM_setValue(IGN, parsePrefixes(ign.input.value));
+      GM_setValue(DLH, parseHosts(dlh.input.value));
       GM_setValue(SORT, sortBox.checked);
       GM_setValue(TBPOS, posSel.value);
+      GM_setValue(DPOS, dposSel.value);
       GM_setValue(ONEXT, Math.max(0, parseInt(nextIn.value, 10) || 0));
       GM_setValue(PAR, Math.min(20, Math.max(1, parseInt(parIn.value, 10) || DEFAULT_PARALLEL)));
       GM_setValue(DLY, Math.min(60000, Math.max(0, parseInt(dlyIn.value, 10) || 0)));
@@ -430,7 +465,7 @@
     cancel.addEventListener('click', onDone);
 
     const wrap = mk('div');
-    wrap.append(ign.wrap, sortWrap, posWrap, nextWrap, parWrap, dlyWrap,
+    wrap.append(ign.wrap, dlh.wrap, sortWrap, posWrap, dposWrap, nextWrap, parWrap, dlyWrap,
                 heading('Seen scenes (' + seenCodes().length + ')'), exp, imp, impFuzzy, fileIn, fuzzIn, seenMsg,
                 heading('qBittorrent remote access'), url.wrap, user.wrap, pass.wrap, ratio.wrap,
                 test, testMsg, msg, save, cancel);
@@ -486,9 +521,11 @@
   // --------------------- toolbar (every list page, position is a setting) ---------------------
   // Returns the buttons; callers attach behaviour to openAll / hide.
   function makeToolbar(withNext) {
-    const [vert, horiz] = getToolbarPos().split('-');           // 'top'|'bottom', 'left'|'right'
-    const { host, root } = shadowUI('display:block;position:fixed;' + vert + ':8px;' + horiz + ':8px;z-index:2147483647;');
-    const side = horiz === 'left' ? 'flex-start' : 'flex-end';
+    const [vert, horiz] = getToolbarPos().split('-');           // 'top'|'bottom', 'left'|'center'|'right'
+    const hCss = horiz === 'center' ? 'left:50%;transform:translateX(-50%);width:max-content;max-width:calc(100vw - 16px);'
+                                    : horiz + ':8px;';
+    const { host, root } = shadowUI('display:block;position:fixed;' + vert + ':8px;' + hCss + 'z-index:2147483647;');
+    const side = horiz === 'left' ? 'flex-start' : horiz === 'center' ? 'center' : 'flex-end';
     // bottom positions: the bar stays at the screen edge and the panels open above it
     const col = mk('div', 'display:flex;flex-direction:' + (vert === 'top' ? 'column' : 'column-reverse') +
       ';align-items:' + side + ';gap:4px');
@@ -531,10 +568,11 @@
     return { openAll, openNext, hide };
   }
 
-  // ----------------- single-scene page box (top left, shadow DOM) -----------------
+  // ----------------- single-scene page box (position is a setting, shadow DOM) -----------------
   // info: { magnet, torrent, view } or null.  want: show "★ I want".
-  function detailBox({ code, info, want }) {
-    const { host, root } = shadowUI('display:block;position:fixed;top:10px;left:10px;z-index:2147483647;');
+  // links: file-host links found in the page's comments (optional), offered through a "Copy links" button.
+  function detailBox({ code, info, want, links }) {
+    const { host, root } = shadowUI('display:block;' + posCss(getDetailPos(), 10) + 'z-index:2147483647;');
     const box = mk('div', 'background:#222;color:#fff;padding:8px 10px;border-radius:6px;font:13px Arial,sans-serif;' +
       'box-shadow:0 2px 8px #0008;min-width:340px;max-width:90vw');
     root.appendChild(box);
@@ -546,7 +584,9 @@
     // Any decision (download, interested, not interested) marks the scene as seen.
     const markSeen = () => { const m = /^(.+)-(\d+)$/.exec(code); if (m) markOpened(normKey(m[1], m[2])); };
 
+    let status = '', formOpen = false;
     function render(showForm) {
+      formOpen = !!showForm;
       box.textContent = '';
       box.appendChild(mk('div', 'font-weight:bold;margin-bottom:6px', code));
       if (showForm) { box.appendChild(configForm(() => render(false))); return; }
@@ -595,6 +635,41 @@
       bigRow.appendChild(close);
       box.appendChild(bigRow);
 
+      // download links found in the comments: one button copies them (one per line, ready for JDownloader)
+      if (links && links.length) {
+        const cRow = mk('div', 'display:flex;gap:6px;margin-bottom:6px');
+        const label = '📋 Copy ' + (links.length > 1 ? links.length + ' links' : 'link');
+        const cp = mk('a', BIG + 'background:#6a4bc4', label);
+        cp.href = '#';
+        cp.title = links.join('\n');
+        cp.addEventListener('click', async (ev) => {
+          ev.preventDefault();
+          const text = links.join('\n');
+          let ok = false;
+          try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {
+            const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+            try { ok = document.execCommand('copy'); } catch (e2) { /* ignore */ }
+            ta.remove();
+          }
+          cp.textContent = ok ? '✔ Copied' : '✗ Copy failed';
+          setTimeout(() => { cp.textContent = label; }, 2500);
+        });
+        cRow.appendChild(cp);
+        box.appendChild(cRow);
+      }
+
+      // no torrent / magnet on this page: second line with a shortcut to search the scene on sukebei
+      if (!hasLink) {
+        const sRow = mk('div', 'display:flex;gap:6px;margin-bottom:6px');
+        const sk = mk('a', BIG + 'background:#3582f7', '🔍 Search on sukebei');
+        sk.href = 'https://sukebei.nyaa.si/?f=0&c=0_0&q=' + encodeURIComponent(code);
+        sk.target = '_blank'; sk.rel = 'noopener';
+        sRow.appendChild(sk);
+        box.appendChild(sRow);
+      }
+
+      if (status) box.appendChild(mk('div', 'font-size:11px;color:#aaa;margin-bottom:4px', status));
+
       if (info) {
         const cfgBtn = mk('a', BTN + 'background:#555;font-size:11px;padding:2px 6px', configured ? '⚙' : '⚙ Configure qBittorrent');
         cfgBtn.href = '#';
@@ -605,6 +680,15 @@
     }
     render(false);
     document.body.appendChild(host);
+    // Lets the caller refresh the box later (e.g. once more comment pages have been scanned).
+    return {
+      update(o) {
+        if ('info' in o) info = o.info;
+        if ('links' in o) links = o.links;
+        if ('status' in o) status = o.status;
+        if (!formOpen) render(false); // don't close the settings form the user is editing
+      },
+    };
   }
 
   // ---------------------- listing sites: hide seen / open all ----------------------
@@ -620,10 +704,14 @@
       'a.sil-l-info.sil-nf{background:#fee;color:#a55 !important;border-color:#dbb;font-size:9px;font-weight:normal}';
     document.head.appendChild(st);
     const { openAll, openNext, hide } = makeToolbar(true);
+    // the element holding the scene's link: the title itself, or (linkSelf) the whole item
+    const linkEl = (el, t) => (ls.linkSelf ? el : ls.linkSel ? el.querySelector(ls.linkSel) : t);
     const entries = items.map((el) => {
-      const t = el.querySelector(ls.title);
+      let t = el.querySelector(ls.title);
+      const a = t && linkEl(el, t);
+      if (!a) t = null; // no title or no link: not a usable scene
       const m = t && LCODE_RE.exec(t.textContent + ' ' + (t.getAttribute('title') || ''));
-      return { el, t, key: m ? normKey(m[1], m[2]) : null, badge: null };
+      return { el, t, a, key: m ? normKey(m[1], m[2]) : null, badge: null };
     });
     // ℹ link before each title: finds the scene's description page (same lookup as on sukebei)
     entries.forEach((e) => {
@@ -634,7 +722,7 @@
       link.className = 'sil-l-info'; link.href = '#'; link.textContent = 'ℹ';
       // long ids (e.g. "AV-1399778673") can't be found on the lookup sites: the scene page of this site is the info page
       if (kn.length > 6) {
-        link.href = e.t.href; link.target = '_blank'; link.rel = 'noopener';
+        link.href = e.a.href; link.target = '_blank'; link.rel = 'noopener';
         link.title = 'Open the scene page ' + e.key.toUpperCase();
         e.t.insertAdjacentElement('beforebegin', link);
         return;
@@ -667,7 +755,7 @@
       let n = 0;
       entries.forEach((e) => {
         // wanted scenes keep full visibility (never greyed out or hidden) and get a ★ badge
-        const wanted = !!(e.t && ((e.key && want.has(e.key)) || isWanted(e.t.href)));
+        const wanted = !!(e.t && ((e.key && want.has(e.key)) || isWanted(e.a.href)));
         const is = !wanted && !!(e.key && seen.has(e.key));
         e.el.classList.toggle('sil-l-seen', is);
         if (is) n++;
@@ -685,15 +773,18 @@
     hide.addEventListener('click', () => { GM_setValue(hideKey, !GM_getValue(hideKey, true)); apply(); });
     openAll.addEventListener('click', () => {
       const seen = seenSet();
-      const todo = entries.filter((e) => e.key && e.t && e.t.href && !seen.has(e.key) && e.el.offsetParent !== null);
+      const todo = entries.filter((e) => e.key && e.t && e.a.href && !seen.has(e.key) && e.el.offsetParent !== null);
       if (!todo.length) { alert('Nothing unchecked to open.'); return; }
       if (getSortAlpha()) todo.sort((x, y) => x.key.localeCompare(y.key, undefined, { numeric: true }));
       todo.reverse(); // new tabs are inserted right after this one
-      todo.forEach((e) => GM_openInTab(e.t.href, { active: false, insert: true }));
+      todo.forEach((e) => GM_openInTab(e.a.href, { active: false, insert: true }));
     });
     // "Open next N": unseen scenes of this page first, then of the following pages (/page/2/, /page/3/...).
     // From page 1, it resumes a few pages before the last page it picked from last time (remembered per listing).
-    const pageOf = (href) => { const m = /\/page\/(\d+)\/?$/.exec(new URL(href).pathname); return m ? parseInt(m[1], 10) : 1; };
+    const pageOf = (href) => {
+      if (ls.pageParam) return parseInt(new URL(href).searchParams.get(ls.pageParam), 10) || 1; // "?page=N"
+      const m = /\/page\/(\d+)\/?$/.exec(new URL(href).pathname); return m ? parseInt(m[1], 10) : 1;
+    };
     const listBase = (u) => {
       let path = u.pathname.replace(/\/page\/\d+\/?$/, '/').replace(/\/?$/, '/');
       if (path === '/' && /myjavbay\.com$/.test(u.hostname)) path = '/index.php/';
@@ -701,11 +792,16 @@
     };
     const pageUrl = (href, n) => {
       const u = new URL(href);
+      if (ls.pageParam) { if (n > 1) u.searchParams.set(ls.pageParam, n); else u.searchParams.delete(ls.pageParam); u.hash = ''; return u.href; }
       u.pathname = listBase(u) + (n > 1 ? 'page/' + n + '/' : '');
       u.hash = '';
       return u.href;
     };
-    const memKey = () => { const u = new URL(location.href); return u.hostname + listBase(u); };
+    const memKey = () => {
+      const u = new URL(location.href);
+      if (ls.pageParam) { u.searchParams.delete(ls.pageParam); u.searchParams.sort(); return u.hostname + u.pathname + u.search; }
+      return u.hostname + listBase(u);
+    };
     const LIMIT = getOpenNext();
     let busyNext = false;
     if (openNext) openNext.addEventListener('click', async () => {
@@ -722,7 +818,7 @@
           if (seen.has(key) || want.has(key) || isWanted(href)) return;
           keys.add(key); picked.push({ key, href }); lastPickPage = Math.max(lastPickPage, page);
         };
-        entries.forEach((e) => { if (e.el.offsetParent !== null && e.t) consider(e.key, e.t.href, cur); });
+        entries.forEach((e) => { if (e.el.offsetParent !== null && e.t) consider(e.key, e.a.href, cur); });
         // from page 1, skip the pages that were already worked through last time
         const mem = GM_getValue(LASTP, {})[memKey()] || 0;
         let page = cur + 1;
@@ -742,7 +838,8 @@
           els.forEach((el) => {
             const t = el.querySelector(ls.title);
             const m = t && LCODE_RE.exec(t.textContent + ' ' + (t.getAttribute('title') || ''));
-            if (m) consider(normKey(m[1], m[2]), new URL(t.getAttribute('href'), url).href, page);
+            const a = t && linkEl(el, t);
+            if (m && a) consider(normKey(m[1], m[2]), new URL(a.getAttribute('href'), url).href, page);
           });
           page++;
         }
@@ -768,14 +865,20 @@
   }
 
   // HTTP GET through the userscript manager (cross-origin), used for the site lookups.
-  const get = (url) => new Promise((resolve) => {
+  const get = (url, headers) => new Promise((resolve) => {
     GM_xmlhttpRequest({
-      method: 'GET', url, timeout: TIMEOUT_MS,
+      method: 'GET', url, timeout: TIMEOUT_MS, headers: headers || {},
       onload: (r) => resolve({ status: r.status, text: r.responseText || '', url: r.finalUrl || url }),
       onerror: () => resolve({ status: 0, text: '' }),
       ontimeout: () => resolve({ status: 0, text: '' }),
     });
   });
+
+  // Same-origin GET with the page's own cookies / referrer (a real browser request, unlike GM_xmlhttpRequest).
+  const sameGet = async (url) => {
+    try { const r = await fetch(url, { credentials: 'include' }); return { status: r.status, text: await r.text(), url: r.url }; }
+    catch (e) { return { status: 0, text: '' }; }
+  };
 
   // ---- site error reporting: a toast in the corner (one per site + error, with a counter) ----
   // cooldown shared by every tab (stored): { siteName: timestamp until which it is skipped }
@@ -824,7 +927,11 @@
   if (!/(^|\.)nyaa\.si$/.test(location.hostname)) {
     const ls = LIST_SITES.find((x) => location.hostname === x.domain || location.hostname.endsWith('.' + x.domain));
     const titleText = () => ((document.querySelector('h1.entry-title, h1.post-title, h1.title, h1') || {}).textContent || '') + ' ' + document.title;
-    const pageCode = () => { const m = LCODE_RE.exec(titleText()); return m ? m[1].toUpperCase() + '-' + m[2] : null; };
+    const pageCode = () => {
+      const idEl = document.querySelector('#video_id .text'); // javlibrary
+      const m = (idEl && LCODE_RE.exec(idEl.textContent)) || LCODE_RE.exec(titleText()) || LCODE_RE.exec(location.search); // last: "?id=CODE" (jvrlibrary)
+      return m ? m[1].toUpperCase() + '-' + m[2] : null;
+    };
     // sukebei info for a lookup destination (matched by code in the URL / title)
     const savedInfo = () => {
       const links = GM_getValue(LINKS, {});
@@ -834,16 +941,77 @@
       return c ? { code: c.toUpperCase(), info: links[c] } : null;
     };
 
+    // javlibrary keeps each comment's text (BBCode) in a hidden textarea
+    const commentTexts = (root) => [...root.querySelectorAll('textarea.hidden')].map((t) => t.value || t.textContent).join('\n');
+    // Scans comment text for a magnet / .torrent link (rare) and links to the file hosts configured in the "⚙" form.
+    const scanText = (all) => {
+      const clean = (u) => u.replace(/[.,;:!)]+$/, '');
+      const magnet = (/magnet:\?[^\s\[\]'"<>]+/.exec(all) || [])[0] || null;
+      const torrentM = /https?:\/\/[^\s\[\]'"<>]+\.torrent(?![A-Za-z0-9])[^\s\[\]'"<>]*/i.exec(all);
+      const hosts = getDlHosts();
+      const files = uniq((all.match(/https?:\/\/[^\s\[\]'"<>]+/g) || []).map(clean).filter((u) => {
+        try { const h = new URL(u).hostname.toLowerCase(); return hosts.some((d) => h === d || h.endsWith('.' + d)); }
+        catch (e) { return false; }
+      }));
+      return { magnet, torrent: torrentM ? clean(torrentM[0]) : null, files };
+    };
+
     if (ls) {
       if (ls.detail.test(location.pathname)) {                       // a single-scene page
         const code = pageCode();
         const saved = ls.alsoDestination ? savedInfo() : null;
         let info = saved ? saved.info : null;
+        let links = null;
+        const infoFrom = (c, prev) => (c.magnet || c.torrent ? { magnet: c.magnet, torrent: c.torrent, view: location.href } : prev);
+        let localTexts = '';
+        if (ls.comments) {                                           // torrent / download links posted in the comments
+          localTexts = commentTexts(document);                       // the comments shown on this page, available right away
+          const c = scanText(localTexts);
+          info = infoFrom(c, info);
+          links = c.files;
+        }
         if (ls.qb) {                                                 // take the magnet link from the page
           const mg = document.querySelector('a[href^="magnet:"]');
           if (mg) info = { magnet: mg.href, torrent: null, view: location.href };
         }
-        if (code || saved) detailBox({ code: code || saved.code, info, want: !!ls.want });
+        const isCommentsPage = /videocomments\.php$/.test(location.pathname);   // javlibrary's "all comments" page
+        const box = (code || saved) ? detailBox({ code: code || saved.code, info, want: !!ls.want && !isCommentsPage, links }) : null;
+        if (box && ls.comments) {
+          // Then read ALL the comments (every language, every page) from "videocomments.php?v=ID&mode=2"
+          // Like a user would: follow the page's own "Show Comments in All Languages" link (or "See All comments"),
+          // then the "Next Page" link of each comments page, sending the previous page as the referrer.
+          const vid = (/\/(jav[a-z0-9]+)\.html$/i.exec(location.pathname) || [])[1] || new URLSearchParams(location.search).get('v');
+          // "#video_comments_all" is "See All comments". ("#video_comments_alllang" is the language toggle: it can read
+          // "Show Comments in English only", so it must not be used.) Its link has no "mode=2" on some pages: force it (all languages).
+          const allLink = document.querySelector('#video_comments_all a[href]');
+          let url = null;
+          try {
+            const u = allLink ? new URL(allLink.href)
+              : vid ? new URL(location.origin + '/' + location.pathname.split('/')[1] + '/videocomments.php?v=' + encodeURIComponent(vid)) : null;
+            if (u) { u.searchParams.set('mode', '2'); url = u.href; }
+          } catch (e) { url = null; }
+          if (url) (async () => {
+            const MAX_PAGES = 10;
+            let all = localTexts, pages = 0, comments = 0, err = '';
+            const visited = new Set();
+            try {
+              for (let page = 1; url && !visited.has(url) && page <= MAX_PAGES; page++) {
+                visited.add(url);
+                box.update({ status: 'Scanning comments, page ' + page + '…' });
+                const r = await sameGet(url);
+                if (r.status !== 200) { err = ' (page ' + page + ': HTTP ' + r.status + ')'; break; }
+                const doc = new DOMParser().parseFromString(r.text, 'text/html');
+                all += '\n' + commentTexts(doc);
+                pages++; comments += doc.querySelectorAll('textarea.hidden').length;
+                const nx = doc.querySelector('.page_selector a.page.next[href]');   // "Next Page" (absent on the last page)
+                url = nx ? new URL(nx.getAttribute('href'), url).href : null;
+              }
+              const c = scanText(all);
+              box.update({ info: infoFrom(c, info), links: c.files,
+                           status: 'Scanned ' + comments + ' comments on ' + pages + ' page(s)' + err });
+            } catch (e) { box.update({ status: 'Comment scan failed: ' + e.message }); }
+          })();
+        }
         return;
       }
       const items = [...document.querySelectorAll(ls.item)];
