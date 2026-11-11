@@ -34,7 +34,8 @@
   // ------------------------------------------------------------------
   // USER SETTINGS (things you may want to change)
   // ------------------------------------------------------------------
-  const PARALLEL = 3;        // how many scenes "Open all unchecked" looks up at once
+  const DEFAULT_PARALLEL = 3;   // default number of scenes looked up at once ("threads"); change it with the "⚙" form
+  const DEFAULT_DELAY_MS = 1000; // default minimum delay between two requests to the same lookup site; change it with the "⚙" form
   const DEFAULT_IGNORED = []; // code prefixes to ignore (not real scenes); editable with the "⚙" form
   const DEFAULT_OPEN_NEXT = 20; // default for "Open next N" (following page 2, 3...); change it with the "⚙" form, 0 = no button
   const RESUME_BACK_PAGES = 1; // "Open next" restarts this many pages before the last page it picked from (safety margin)
@@ -48,19 +49,19 @@
   // A candidate is accepted when it answers HTTP 200 and the page text
   // contains the code (fuzzy on leading zeros). `search: true` means the URL
   // is a search page: we parse the first result link containing the code.
-  // `delay` (ms, optional): minimum time between two requests to that site.
+  // (The delay between requests to a site and the number of parallel lookups are global settings, in the "⚙" form.)
   // ------------------------------------------------------------------
   const pad = (n, w) => String(n).padStart(w, '0');
   const SITES = [
-    { name: 'jvrlibrary', delay: 1000,
+    { name: 'jvrlibrary',
       probe: (p, n) => [`https://www.jvrlibrary.com/jvr?id=${p.toUpperCase()}-${n}`] },
-    { name: 'javdatabase', delay: 0,
+    { name: 'javdatabase',
       probe: (p, n) => uniq([`https://www.javdatabase.com/movies/${p}-${n}/`,
                              `https://www.javdatabase.com/movies/${p}-${pad(n, 5)}/`]) },
-    { name: 'r18.dev', delay: 0, noVerify: true, // page is rendered by JS: status only
+    { name: 'r18.dev', noVerify: true, // page is rendered by JS: status only
       probe: (p, n) => uniq([`https://r18.dev/videos/vod/movies/detail/-/id=${p}${pad(n, 5)}/`,
                              `https://r18.dev/videos/vod/movies/detail/-/id=${p}${n}/`]) },
-    { name: 'maxjav', delay: 0, search: true, detail: /^\/\d+\/[^\/]+\/?$/, // only accept scene pages (not tag / category links)
+    { name: 'maxjav', search: true, detail: /^\/\d+\/[^\/]+\/?$/, // only accept scene pages (not tag / category links)
       probe: (p, n) => [`https://maxjav.com/?s=${p}-${n}`] },
   ];
   // Listing / scene sites. `item` = one scene's container on listing pages, `title` = element
@@ -124,6 +125,17 @@
   const getOpenNext = () => {
     const v = parseInt(GM_getValue(ONEXT, DEFAULT_OPEN_NEXT), 10);
     return isFinite(v) && v > 0 ? Math.min(v, 200) : 0;
+  };
+
+  // Lookup settings: parallel lookups ("threads") and minimum delay (ms) between two requests to the same site.
+  const PAR = 'lookupParallel', DLY = 'lookupDelayMs';
+  const getParallel = () => {
+    const v = parseInt(GM_getValue(PAR, DEFAULT_PARALLEL), 10);
+    return isFinite(v) && v > 0 ? Math.min(v, 20) : DEFAULT_PARALLEL;
+  };
+  const getDelay = () => {
+    const v = parseInt(GM_getValue(DLY, DEFAULT_DELAY_MS), 10);
+    return isFinite(v) && v >= 0 ? Math.min(v, 60000) : DEFAULT_DELAY_MS;
   };
 
   // "Open next N" memory: last page a scene was picked from, per listing ("host/path" -> page number).
@@ -335,6 +347,16 @@
     nextIn.type = 'number'; nextIn.min = '0'; nextIn.max = '200'; nextIn.value = String(getOpenNext());
     nextWrap.appendChild(nextIn);
 
+    const inStyle = 'width:60px;margin-left:4px;padding:2px;background:#fff;color:#000;border:1px solid #888;border-radius:3px;font:12px sans-serif';
+    const parWrap = mk('label', 'display:block;margin:6px 0;font-size:12px', 'Parallel lookups ("threads", 1-20) ');
+    const parIn = mk('input', inStyle);
+    parIn.type = 'number'; parIn.min = '1'; parIn.max = '20'; parIn.value = String(getParallel());
+    parWrap.appendChild(parIn);
+    const dlyWrap = mk('label', 'display:block;margin:6px 0;font-size:12px', 'Delay between requests to the same site (ms) ');
+    const dlyIn = mk('input', inStyle);
+    dlyIn.type = 'number'; dlyIn.min = '0'; dlyIn.max = '60000'; dlyIn.step = '100'; dlyIn.value = String(getDelay());
+    dlyWrap.appendChild(dlyIn);
+
     // --- Seen scenes: export / import ---
     const seenMsg = mk('span', 'font-size:12px');
     const exp = mk('button', BTN + 'background:#555', 'Export seen (A→Z)');
@@ -400,13 +422,15 @@
       GM_setValue(SORT, sortBox.checked);
       GM_setValue(TBPOS, posSel.value);
       GM_setValue(ONEXT, Math.max(0, parseInt(nextIn.value, 10) || 0));
+      GM_setValue(PAR, Math.min(20, Math.max(1, parseInt(parIn.value, 10) || DEFAULT_PARALLEL)));
+      GM_setValue(DLY, Math.min(60000, Math.max(0, parseInt(dlyIn.value, 10) || 0)));
       GM_setValue(QB, c.url === '' ? null : c); // empty address = qBittorrent not configured
       onDone();
     });
     cancel.addEventListener('click', onDone);
 
     const wrap = mk('div');
-    wrap.append(ign.wrap, sortWrap, posWrap, nextWrap,
+    wrap.append(ign.wrap, sortWrap, posWrap, nextWrap, parWrap, dlyWrap,
                 heading('Seen scenes (' + seenCodes().length + ')'), exp, imp, impFuzzy, fileIn, fuzzIn, seenMsg,
                 heading('qBittorrent remote access'), url.wrap, user.wrap, pass.wrap, ratio.wrap,
                 test, testMsg, msg, save, cancel);
@@ -834,10 +858,10 @@
 
   // ============================ NYAA SIDE ============================
   // Returns the URL of the first site that has the scene, or null.
-  // Per-site throttle: waits until `site.delay` ms (default 0) have passed since the last request to that site.
+  // Per-site throttle: waits until the global delay setting has passed since the last request to that site.
   const lastReq = {};
   async function throttle(site) {
-    const wait = (lastReq[site.name] || 0) + (site.delay || 0) - Date.now();
+    const wait = (lastReq[site.name] || 0) + getDelay() - Date.now();
     lastReq[site.name] = Date.now() + Math.max(0, wait); // reserve the slot so concurrent lookups queue up
     if (wait > 0) await new Promise((res) => setTimeout(res, wait));
   }
@@ -1003,7 +1027,7 @@
     const worker = async () => {
       while (next < todo.length) { const i = next++; results[i](await todo[i].lookup()); }
     };
-    for (let i = 0; i < PARALLEL; i++) worker();
+    for (let i = 0; i < getParallel(); i++) worker();
     (async () => {
       for (const p of ready) {
         const url = await p;
@@ -1073,7 +1097,7 @@
               openNextBtn.textContent = 'Looking up… (' + found.length + '/' + LIMIT + ')';
             }
           };
-          await Promise.all(Array.from({ length: PARALLEL }, worker));
+          await Promise.all(Array.from({ length: getParallel() }, worker));
         };
         // this page (rows already on screen, with their ℹ links)
         pending().forEach((r) => {
