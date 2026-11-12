@@ -706,8 +706,11 @@
     const { openAll, openNext, hide } = makeToolbar(true);
     // the element holding the scene's link: the title itself, or (linkSelf) the whole item
     const linkEl = (el, t) => (ls.linkSelf ? el : ls.linkSel ? el.querySelector(ls.linkSel) : t);
+    // first title element that is not one of our own ℹ links (those sit next to the title and have href="#")
+    const isOurs = (x) => x.classList.contains('sil-l-info') || (x.tagName === 'A' && /^#?$/.test(x.getAttribute('href') || '#'));
+    const findTitle = (el) => [...el.querySelectorAll(ls.title)].find((x) => !isOurs(x)) || null;
     const entries = items.map((el) => {
-      let t = el.querySelector(ls.title);
+      let t = findTitle(el);
       const a = t && linkEl(el, t);
       if (!a) t = null; // no title or no link: not a usable scene
       const m = t && LCODE_RE.exec(t.textContent + ' ' + (t.getAttribute('title') || ''));
@@ -773,7 +776,7 @@
     hide.addEventListener('click', () => { GM_setValue(hideKey, !GM_getValue(hideKey, true)); apply(); });
     openAll.addEventListener('click', () => {
       const seen = seenSet();
-      const todo = entries.filter((e) => e.key && e.t && e.a.href && !seen.has(e.key) && e.el.offsetParent !== null);
+      const todo = entries.filter((e) => e.key && e.t && e.a.getAttribute('href') && !/^#/.test(e.a.getAttribute('href')) && !seen.has(e.key) && e.el.offsetParent !== null);
       if (!todo.length) { alert('Nothing unchecked to open.'); return; }
       if (getSortAlpha()) todo.sort((x, y) => x.key.localeCompare(y.key, undefined, { numeric: true }));
       todo.reverse(); // new tabs are inserted right after this one
@@ -836,7 +839,7 @@
           const els = [...doc.querySelectorAll(ls.item)];
           if (!els.length) { stop = 'No more pages.'; break; }
           els.forEach((el) => {
-            const t = el.querySelector(ls.title);
+            const t = findTitle(el);
             const m = t && LCODE_RE.exec(t.textContent + ' ' + (t.getAttribute('title') || ''));
             const a = t && linkEl(el, t);
             if (m && a) consider(normKey(m[1], m[2]), new URL(a.getAttribute('href'), url).href, page);
