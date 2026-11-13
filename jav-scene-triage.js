@@ -207,6 +207,18 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     return codes.length;
   }
+  // Exports the wanted list as text: one "CODE<TAB>url" line per scene, sorted by code.
+  function exportWanted() {
+    const list = Object.values(getWanted());
+    const label = (it) => it.code || codeIn(it.title) || codeIn(it.url) || '';
+    list.sort((a, b) => label(a).localeCompare(label(b), undefined, { numeric: true, sensitivity: 'base' }) || a.t - b.t);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([list.map((it) => label(it) + '\t' + it.url).join('\n') + '\n'], { type: 'text/plain' }));
+    a.download = 'wanted-scenes.txt';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    return list.length;
+  }
   // Reads every scene code found in `text` (any separators) and adds it to the seen list.
   function importSeen(text) {
     const re = new RegExp(LCODE_RE.source, 'g');
@@ -424,6 +436,13 @@
     impFuzzy.title = 'Extract scene codes from any text file, e.g. a list of torrent / file names';
     impFuzzy.addEventListener('click', () => fuzzIn.click());
 
+    // --- Wanted scenes: export ---
+    const wantMsg = mk('span', 'font-size:12px');
+    const expW = mk('button', BTN + 'background:#555', 'Export wanted (A→Z)');
+    expW.addEventListener('click', () => {
+      wantMsg.style.color = '#6e6'; wantMsg.textContent = exportWanted() + ' scenes exported';
+    });
+
     // --- qBittorrent ---
     const url = field('Web UI address (e.g. http://192.168.1.10:8080)', 'text', f.url || '');
     const user = field('Username (empty if no authentication)', 'text', f.user);
@@ -467,6 +486,7 @@
     const wrap = mk('div');
     wrap.append(ign.wrap, dlh.wrap, sortWrap, posWrap, dposWrap, nextWrap, parWrap, dlyWrap,
                 heading('Seen scenes (' + seenCodes().length + ')'), exp, imp, impFuzzy, fileIn, fuzzIn, seenMsg,
+                heading('Wanted scenes (' + Object.keys(getWanted()).length + ')'), expW, wantMsg,
                 heading('qBittorrent remote access'), url.wrap, user.wrap, pass.wrap, ratio.wrap,
                 test, testMsg, msg, save, cancel);
     return wrap;
@@ -477,14 +497,16 @@
     const wrap = mk('div');
     function render() {
       wrap.textContent = '';
-      const list = Object.values(getWanted()).sort((a, b) => a.t - b.t);
+      const labelOf = (it) => it.code || codeIn(it.title) || codeIn(it.url) || it.url;
+      const list = Object.values(getWanted())
+        .sort((a, b) => labelOf(a).localeCompare(labelOf(b), undefined, { numeric: true, sensitivity: 'base' }) || a.t - b.t);
       wrap.appendChild(mk('div', 'font-weight:bold;margin-bottom:6px', '★ Wanted (' + list.length + ')'));
       if (!list.length) wrap.appendChild(mk('div', 'font-size:12px;color:#aaa;margin-bottom:6px',
         'Empty. Use "★ I want" on a scene page, or add a link below.'));
       list.forEach((it) => {
         const row = mk('div', 'display:flex;gap:6px;align-items:center;margin:3px 0');
         const a = mk('a', 'flex:1;font-size:13px;color:#9cf;text-decoration:none;overflow-wrap:anywhere',
-          it.code || codeIn(it.title) || codeIn(it.url) || it.url);
+          labelOf(it));
         a.href = it.url; a.target = '_blank'; a.rel = 'noopener'; a.title = it.url;
         const x = mk('button', 'padding:0 6px;font:12px Arial,sans-serif;cursor:pointer;border:1px solid #888;' +
           'border-radius:3px;background:#a44;color:#fff', '✖');
