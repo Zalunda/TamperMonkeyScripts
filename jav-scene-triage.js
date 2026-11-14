@@ -232,7 +232,7 @@
       const nums = [...byPrefix[p]].sort((a, b) => a - b);
       return p + '.*(?<!\\d)0*' + (nums.length > 1 ? '(' + nums.join('|') + ')' : nums[0]) + '(?!\\d)';
     });
-    return { regex: parts.length ? '(' + parts.join('|') + ')' : '', count: parts.length };
+    return { regex: parts.length ? 'regex:(?<![A-Za-z])(' + parts.join('|') + ')' : '', count: parts.length }; // "regex:" prefix = JDownloader's LinkGrabber search syntax
   }
   // Reads every scene code found in `text` (any separators) and adds it to the seen list.
   function importSeen(text) {
@@ -451,27 +451,6 @@
     impFuzzy.title = 'Extract scene codes from any text file, e.g. a list of torrent / file names';
     impFuzzy.addEventListener('click', () => fuzzIn.click());
 
-    // --- Wanted scenes: export ---
-    const wantMsg = mk('span', 'font-size:12px');
-    const expW = mk('button', BTN + 'background:#555', 'Export wanted (A→Z)');
-    expW.addEventListener('click', () => {
-      wantMsg.style.color = '#6e6'; wantMsg.textContent = exportWanted() + ' scenes exported';
-    });
-
-    const regexBox = mk('textarea', 'display:none;width:100%;height:70px;margin-top:4px;background:#fff;color:#000;border:1px solid #888;border-radius:3px;font:11px monospace');
-    regexBox.readOnly = true;
-    const expR = mk('button', BTN + 'background:#555', 'Wanted as regex');
-    expR.title = 'Loose regex matching file names of the wanted scenes (copied to the clipboard)';
-    expR.addEventListener('click', async () => {
-      const { regex, count } = wantedRegex();
-      if (!regex) { wantMsg.style.color = '#fc6'; wantMsg.textContent = 'Wanted list is empty'; return; }
-      regexBox.value = regex; regexBox.style.display = 'block'; regexBox.select();
-      let ok = false;
-      try { await navigator.clipboard.writeText(regex); ok = true; } catch (e) { try { ok = document.execCommand('copy'); } catch (e2) { /* ignore */ } }
-      wantMsg.style.color = '#6e6';
-      wantMsg.textContent = count + ' prefixes' + (ok ? ', copied' : ', copy it from the box');
-    });
-
     // --- qBittorrent ---
     const url = field('Web UI address (e.g. http://192.168.1.10:8080)', 'text', f.url || '');
     const user = field('Username (empty if no authentication)', 'text', f.user);
@@ -515,7 +494,6 @@
     const wrap = mk('div');
     wrap.append(ign.wrap, dlh.wrap, sortWrap, posWrap, dposWrap, nextWrap, parWrap, dlyWrap,
                 heading('Seen scenes (' + seenCodes().length + ')'), exp, imp, impFuzzy, fileIn, fuzzIn, seenMsg,
-                heading('Wanted scenes (' + Object.keys(getWanted()).length + ')'), expW, expR, wantMsg, regexBox,
                 heading('qBittorrent remote access'), url.wrap, user.wrap, pass.wrap, ratio.wrap,
                 test, testMsg, msg, save, cancel);
     return wrap;
@@ -524,6 +502,7 @@
   // ------------------------------ wanted list UI ------------------------------
   function wantedPanel() {
     const wrap = mk('div');
+    let carry = null; // { msg, input, good } shown in the "Add a scene number" form after the next render()
     function render() {
       wrap.textContent = '';
       const labelOf = (it) => it.code || codeIn(it.title) || codeIn(it.url) || it.url;
@@ -552,7 +531,72 @@
           list.slice().reverse().forEach((it) => GM_openInTab(it.url, { active: false, insert: true }));
         });
         wrap.appendChild(all);
+        // loose regex matching file names of the wanted scenes (copied to the clipboard)
+        const rx = mk('button', BTN + 'background:#555;margin-top:6px', 'Copy as regex');
+        rx.title = 'Loose regex matching file names of the wanted scenes';
+        const rxBox = mk('textarea', 'display:none;width:100%;height:70px;margin-top:4px;background:#fff;color:#000;border:1px solid #888;border-radius:3px;font:11px monospace');
+        rxBox.readOnly = true;
+        rx.addEventListener('click', async () => {
+          const { regex, count } = wantedRegex();
+          rxBox.value = regex; rxBox.style.display = 'block'; rxBox.select();
+          let ok = false;
+          try { await navigator.clipboard.writeText(regex); ok = true; } catch (e) { try { ok = document.execCommand('copy'); } catch (e2) { /* ignore */ } }
+          rx.textContent = ok ? '✔ Copied (' + count + ' prefixes)' : 'Copy from the box';
+          setTimeout(() => { rx.textContent = 'Copy as regex'; }, 2500);
+        });
+        const ex = mk('button', BTN + 'background:#555;margin-top:6px', 'Export (A→Z)');
+        ex.title = 'Download the wanted list as a text file (code + link)';
+        ex.addEventListener('click', () => {
+          const n = exportWanted();
+          ex.textContent = '✔ ' + n + ' exported';
+          setTimeout(() => { ex.textContent = 'Export (A→Z)'; }, 2500);
+        });
+        wrap.append(ex, rx, rxBox);
       }
+      // add by scene number: looks the description page up on the configured sites
+      wrap.appendChild(mk('div', 'border-top:1px solid #555;margin:8px 0 2px;padding-top:6px;font-size:12px;color:#9cf', 'Add a scene number'));
+      const num = field('Scene numbers, separated by spaces or commas (e.g. SIVR-102)', 'text', '');
+      const numMsg = mk('div', 'font-size:12px;color:#fc6');
+      const numAdd = mk('button', BTN + 'background:#2a8;margin-top:4px', 'Find, add & open all');
+      numAdd.title = 'Looks each scene up, adds it to the list and opens the pages it found in background tabs';
+      const addByNumber = async () => {
+        const re = new RegExp(LCODE_RE.source, 'g');
+        const todo = [], seenK = new Set();
+        let m;
+        while ((m = re.exec(num.input.value))) {
+          const key = normKey(m[1], m[2]);
+          if (!seenK.has(key)) { seenK.add(key); todo.push({ key, code: m[1].toUpperCase() + '-' + m[2], url: null }); }
+        }
+        if (!todo.length) { numMsg.style.color = '#fc6'; numMsg.textContent = 'No scene number found (expected e.g. AP-661)'; return; }
+        numAdd.disabled = true; numMsg.style.color = '#ccc';
+        let next = 0, done = 0;
+        numMsg.textContent = 'Searching… (0/' + todo.length + ')';
+        const worker = async () => {
+          while (next < todo.length) {
+            const t = todo[next++];
+            t.url = await findScene(t.key);
+            markNF(t.key, t.url);
+            t.err = !t.url && errCodes.has(t.key);
+            numMsg.textContent = 'Searching… (' + (++done) + '/' + todo.length + ')';
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(getParallel(), todo.length) }, worker));
+        numAdd.disabled = false;
+        const ok = todo.filter((t) => t.url), missing = todo.filter((t) => !t.url);
+        ok.forEach((t) => addWanted(t.url, t.code));
+        // new tabs are inserted right after this one: open in reverse to keep the typed order left-to-right
+        ok.slice().reverse().forEach((t) => GM_openInTab(t.url, { active: false, insert: true }));
+        // the panel is rebuilt by render(): carry the result message (and the codes to retry) over to the new form
+        carry = missing.length
+          ? { msg: ok.length + ' opened. Not found: ' + missing.map((t) => t.code + (t.err ? ' (site error)' : '')).join(', '),
+              input: missing.map((t) => t.code).join(', ') }
+          : { msg: ok.length + ' opened.', input: '', good: true };
+        render();
+      };
+      numAdd.addEventListener('click', addByNumber);
+      num.input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') addByNumber(); });
+      if (carry) { num.input.value = carry.input; numMsg.textContent = carry.msg; numMsg.style.color = carry.good ? '#6e6' : '#fc6'; carry = null; }
+      wrap.append(num.wrap, numMsg, numAdd);
       wrap.appendChild(mk('div', 'border-top:1px solid #555;margin:8px 0 2px;padding-top:6px;font-size:12px;color:#9cf', 'Add a link manually'));
       const url = field('Address (https://…)', 'text', '');
       const msg = mk('div', 'font-size:12px;color:#fc6');
@@ -1015,14 +1059,17 @@
         const code = pageCode();
         const saved = ls.alsoDestination ? savedInfo() : null;
         let info = saved ? saved.info : null;
-        let links = null;
+        // file-host links (rapidgator...) found anywhere on the page itself: link targets and plain text
+        const pageFiles = scanText([...document.querySelectorAll('a[href]')].map((a) => a.href).join('\n') + '\n' +
+                                   ((document.body && document.body.textContent) || '')).files;
+        let links = pageFiles;
         const infoFrom = (c, prev) => (c.magnet || c.torrent ? { magnet: c.magnet, torrent: c.torrent, view: location.href } : prev);
         let localTexts = '';
         if (ls.comments) {                                           // torrent / download links posted in the comments
           localTexts = commentTexts(document);                       // the comments shown on this page, available right away
           const c = scanText(localTexts);
           info = infoFrom(c, info);
-          links = c.files;
+          links = uniq(c.files.concat(pageFiles));
         }
         if (ls.qb) {                                                 // take the magnet link from the page
           const mg = document.querySelector('a[href^="magnet:"]');
@@ -1061,7 +1108,7 @@
                 url = nx ? new URL(nx.getAttribute('href'), url).href : null;
               }
               const c = scanText(all);
-              box.update({ info: infoFrom(c, info), links: c.files,
+              box.update({ info: infoFrom(c, info), links: uniq(c.files.concat(pageFiles)),
                            status: 'Scanned ' + comments + ' comments on ' + pages + ' page(s)' + err });
             } catch (e) { box.update({ status: 'Comment scan failed: ' + e.message }); }
           })();
