@@ -219,6 +219,21 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     return list.length;
   }
+  // Loose regex matching file names of the wanted scenes: "(AJVR.*248|DSVR.*(283|494)|...)", case-insensitive use intended.
+  function wantedRegex() {
+    const byPrefix = {};
+    Object.values(getWanted()).forEach((it) => {
+      const m = LCODE_RE.exec(it.code || codeIn(it.title) || codeIn(it.url) || '');
+      if (!m) return;
+      const p = m[1].toUpperCase();
+      (byPrefix[p] = byPrefix[p] || new Set()).add(String(parseInt(m[2], 10)).padStart(2, '0')); // at least 2 digits ("03"), so "-3" in "OYCVR-092-3.mp4" doesn't match
+    });
+    const parts = Object.keys(byPrefix).sort().map((p) => {
+      const nums = [...byPrefix[p]].sort((a, b) => a - b);
+      return p + '.*(?<!\\d)0*' + (nums.length > 1 ? '(' + nums.join('|') + ')' : nums[0]) + '(?!\\d)';
+    });
+    return { regex: parts.length ? '(' + parts.join('|') + ')' : '', count: parts.length };
+  }
   // Reads every scene code found in `text` (any separators) and adds it to the seen list.
   function importSeen(text) {
     const re = new RegExp(LCODE_RE.source, 'g');
@@ -443,6 +458,20 @@
       wantMsg.style.color = '#6e6'; wantMsg.textContent = exportWanted() + ' scenes exported';
     });
 
+    const regexBox = mk('textarea', 'display:none;width:100%;height:70px;margin-top:4px;background:#fff;color:#000;border:1px solid #888;border-radius:3px;font:11px monospace');
+    regexBox.readOnly = true;
+    const expR = mk('button', BTN + 'background:#555', 'Wanted as regex');
+    expR.title = 'Loose regex matching file names of the wanted scenes (copied to the clipboard)';
+    expR.addEventListener('click', async () => {
+      const { regex, count } = wantedRegex();
+      if (!regex) { wantMsg.style.color = '#fc6'; wantMsg.textContent = 'Wanted list is empty'; return; }
+      regexBox.value = regex; regexBox.style.display = 'block'; regexBox.select();
+      let ok = false;
+      try { await navigator.clipboard.writeText(regex); ok = true; } catch (e) { try { ok = document.execCommand('copy'); } catch (e2) { /* ignore */ } }
+      wantMsg.style.color = '#6e6';
+      wantMsg.textContent = count + ' prefixes' + (ok ? ', copied' : ', copy it from the box');
+    });
+
     // --- qBittorrent ---
     const url = field('Web UI address (e.g. http://192.168.1.10:8080)', 'text', f.url || '');
     const user = field('Username (empty if no authentication)', 'text', f.user);
@@ -486,7 +515,7 @@
     const wrap = mk('div');
     wrap.append(ign.wrap, dlh.wrap, sortWrap, posWrap, dposWrap, nextWrap, parWrap, dlyWrap,
                 heading('Seen scenes (' + seenCodes().length + ')'), exp, imp, impFuzzy, fileIn, fuzzIn, seenMsg,
-                heading('Wanted scenes (' + Object.keys(getWanted()).length + ')'), expW, wantMsg,
+                heading('Wanted scenes (' + Object.keys(getWanted()).length + ')'), expW, expR, wantMsg, regexBox,
                 heading('qBittorrent remote access'), url.wrap, user.wrap, pass.wrap, ratio.wrap,
                 test, testMsg, msg, save, cancel);
     return wrap;
